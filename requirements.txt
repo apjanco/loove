@@ -1,0 +1,13 @@
+# Core tokenizer libraries
+transformers>=4.40.0      # HuggingFace AutoTokenizer (no torch needed for tokenizer-only use)
+tokenizers>=0.19.0        # Rust-backed tokenizer engine (pulled by transformers)
+tiktoken>=0.7.0           # OpenAI BPE tokenizer
+sentencepiece>=0.2.0      # SentencePiece models (LLaMA, T5, mBART, etc.)
+
+# Data / Unicode
+babel>=2.14.0             # CLDR locale metadata (scripts, language names)
+langcodes>=3.4.0          # ISO 639-3 → BCP 47 normalisation (Glottolog bridge)
+requests>=2.31.0          # HTTP downloads for CLDR XML, UCD files, UDHR corpus
+
+# Utilities
+tqdm>=4.66.0              # Progress bars for bulk processing
