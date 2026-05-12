@@ -129,9 +129,11 @@ def _extract_body(xml_text: str, max_chars: int = 4000) -> str:
         return ""
 
     parts: list[str] = []
-    # Collect text from <title> and <para> elements anywhere in the document
+    # Tags are namespace-qualified: {http://efele.net/udhr}para etc.
+    # Match by local name only so we don't hard-code the namespace URL.
     for elem in root.iter():
-        if elem.tag in ("title", "para") and elem.text:
+        local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if local in ("title", "para") and elem.text:
             stripped = elem.text.strip()
             if stripped:
                 parts.append(stripped)
