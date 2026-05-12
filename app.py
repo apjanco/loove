@@ -99,8 +99,8 @@ def build_dataframe(data: dict) -> pd.DataFrame:
             # tier2/3 codepoint lists for drill-down
             "tier2_cps":      main.get("tier2", []),
             "tier3_cps":      main.get("tier3", []),
-            "tokens_per_char": fert.get("tokens_per_char"),
-            "tokens_per_word": fert.get("tokens_per_word"),
+            "tokens_per_char": float(fert["tokens_per_char"]) if fert.get("tokens_per_char") is not None else None,
+            "tokens_per_word": float(fert["tokens_per_word"]) if fert.get("tokens_per_word") is not None else None,
             "sample_chars":   fert.get("sample_chars"),
             "latitude":       lang.get("latitude"),
             "longitude":      lang.get("longitude"),
@@ -364,7 +364,9 @@ def make_family_chart(df: pd.DataFrame) -> go.Figure:
 
 
 def make_fertility_scatter(df: pd.DataFrame) -> go.Figure:
-    fdf = df.dropna(subset=["tokens_per_char"]).copy()
+    fdf = df.copy()
+    fdf["tokens_per_char"] = pd.to_numeric(fdf["tokens_per_char"], errors="coerce")
+    fdf = fdf.dropna(subset=["tokens_per_char"]).copy()
     if fdf.empty:
         fig = go.Figure()
         fig.add_annotation(
@@ -408,7 +410,9 @@ def make_fertility_scatter(df: pd.DataFrame) -> go.Figure:
 
 def make_fertility_bar(df: pd.DataFrame) -> go.Figure:
     """Top-N worst fertility languages (highest tokens/char)."""
-    fdf = df.dropna(subset=["tokens_per_char"]).nlargest(30, "tokens_per_char")
+    fdf = df.copy()
+    fdf["tokens_per_char"] = pd.to_numeric(fdf["tokens_per_char"], errors="coerce")
+    fdf = fdf.dropna(subset=["tokens_per_char"]).nlargest(30, "tokens_per_char")
     if fdf.empty:
         return go.Figure()
 
