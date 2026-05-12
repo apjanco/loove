@@ -1,9 +1,9 @@
 {
-  "model_id": "gpt-4o",
+  "model_id": "o3",
   "source": "tiktoken",
   "vocab_size": 200019,
   "has_byte_fallback": true,
-  "computed_at": "2026-05-12T18:07:43.341611+00:00",
+  "computed_at": "2026-05-12T18:25:36.429949+00:00",
   "languages": {
     "aa": {
       "name": "Afar",
