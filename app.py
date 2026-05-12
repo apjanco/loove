@@ -498,6 +498,187 @@ def make_full_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Language detail helpers
+# ---------------------------------------------------------------------------
+
+def _kv(label: str, value: str) -> str:
+    return (
+        f'<div style="background:#f9fafb;border-radius:8px;padding:10px 14px">'
+        f'<div style="color:#6b7280;font-size:0.8em;margin-bottom:2px">{label}</div>'
+        f'<div style="font-weight:600">{value}</div></div>'
+    )
+
+
+def _tier_row(tier: int, count: int, total: int) -> str:
+    pct = f"{100 * count / max(total, 1):.1f}%"
+    color = TIER_PALETTE[tier]
+    label = ["native token", "embedded", "byte fallback", "unreachable"][tier]
+    return (
+        f'<tr>'
+        f'<td style="padding:4px 0"><span style="display:inline-block;width:10px;height:10px;'
+        f'border-radius:50%;background:{color};margin-right:6px"></span>'
+        f'Tier {tier} \u2014 {label}</td>'
+        f'<td style="text-align:right;padding:4px 8px">{count}</td>'
+        f'<td style="text-align:right;color:#6b7280">{pct}</td></tr>'
+    )
+
+
+def make_language_card_html(row: pd.Series, data: dict) -> str:
+    locale = row["locale"]
+    lang_data = data["languages"].get(locale, {})
+    main = lang_data.get("main") or {}
+    tier2_cps: list[int] = main.get("tier2", [])
+    tier3_cps: list[int] = main.get("tier3", [])
+
+    def fmt_cps(cps: list[int], limit: int = 28) -> str:
+        items = []
+        for cp in cps[:limit]:
+            try:
+                items.append(f"U+{cp:04X}\u00a0({chr(cp)})")
+            except (ValueError, OverflowError):
+                items.append(f"U+{cp:04X}")
+        extra = f" \u2026 +{len(cps) - limit} more" if len(cps) > limit else ""
+        return ",\u2002".join(items) + extra
+
+    grade_color = GRADE_COLORS.get(str(row["grade"]), "#6b7280")
+    tpc = row.get("tokens_per_char")
+    tpw = row.get("tokens_per_word")
+
+    tier2_section = (
+        f'<div style="margin-bottom:16px">'
+        f'<h4 style="margin:0 0 8px;color:#f59e0b">Tier-2 Characters '
+        f'<small style="font-weight:normal;color:#6b7280">(byte-fallback only)</small></h4>'
+        f'<p style="font-family:monospace;font-size:0.9em;line-height:2;margin:0">'
+        f'{fmt_cps(tier2_cps)}</p></div>'
+    ) if tier2_cps else ""
+
+    tier3_section = (
+        f'<div style="margin-bottom:16px">'
+        f'<h4 style="margin:0 0 8px;color:#ef4444">Tier-3 Characters '
+        f'<small style="font-weight:normal;color:#6b7280">(unreachable)</small></h4>'
+        f'<p style="font-family:monospace;font-size:0.9em;line-height:2;margin:0">'
+        f'{fmt_cps(tier3_cps)}</p></div>'
+    ) if tier3_cps else ""
+
+    no_issues = (
+        '<p style="color:#22c55e;font-weight:600">\u2713 All characters are natively tokenized '
+        '(Tier\u00a00) \u2014 no byte-fallback or unreachable characters.</p>'
+    ) if not tier2_cps and not tier3_cps else ""
+
+    return f"""
+<div style="font-family:sans-serif;max-width:960px;padding:8px 0">
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap">
+    <h2 style="margin:0">{row['name']}</h2>
+    <span style="background:{grade_color};color:white;padding:4px 14px;
+          border-radius:999px;font-weight:600;font-size:1.05em">{row['grade']}</span>
+    <span style="font-size:1.6em;font-weight:700;color:{grade_color}">{row['score']:.4f}</span>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+              gap:10px;margin-bottom:24px">
+    {_kv('Locale', row['locale'])}
+    {_kv('Script', row['script'])}
+    {_kv('ISO 639-3', row['iso639_3'] or '\u2014')}
+    {_kv('Glottocode', row['glottocode'] or '\u2014')}
+    {_kv('Language Family', row['family'])}
+    {_kv('Macroarea', row['macroarea'])}
+    {_kv('Total Characters', str(int(row['total_chars'])))}
+    {_kv('Tokens / Char', f"{tpc:.3f}" if pd.notna(tpc) else 'n/a')}
+    {_kv('Tokens / Word', f"{tpw:.3f}" if pd.notna(tpw) else 'n/a')}
+  </div>
+
+  <div style="margin-bottom:24px">
+    <h4 style="margin:0 0 10px;color:#374151">Character Tier Summary</h4>
+    <table style="border-collapse:collapse;width:100%;max-width:500px">
+      <tr><th style="text-align:left;color:#6b7280;font-weight:normal;padding:4px 0">Tier</th>
+          <th style="text-align:right;color:#6b7280;font-weight:normal;padding:4px 8px">Count</th>
+          <th style="text-align:right;color:#6b7280;font-weight:normal">Share</th></tr>
+      {_tier_row(0, int(row['tier0']), int(row['total_chars']))}
+      {_tier_row(1, int(row['tier1']), int(row['total_chars']))}
+      {_tier_row(2, int(row['tier2']), int(row['total_chars']))}
+      {_tier_row(3, int(row['tier3']), int(row['total_chars']))}
+    </table>
+  </div>
+
+  {no_issues}
+  {tier2_section}
+  {tier3_section}
+</div>
+"""
+
+
+def make_language_tier_pie(row: pd.Series) -> go.Figure:
+    labels = ["Tier 0 \u2014 native", "Tier 1 \u2014 embedded",
+              "Tier 2 \u2014 byte fallback", "Tier 3 \u2014 unreachable"]
+    values = [int(row["tier0"]), int(row["tier1"]),
+              int(row["tier2"]), int(row["tier3"])]
+    if sum(values) == 0:
+        return go.Figure()
+
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.45,
+        marker=dict(colors=TIER_PALETTE),
+        textinfo="label+percent",
+        hovertemplate="%{label}<br>%{value} characters<br>%{percent}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"Tier Distribution \u2014 {row['name']}",
+        showlegend=False,
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return fig
+
+
+def make_language_highlighted_map(df: pd.DataFrame, locale: str) -> go.Figure:
+    fig = make_world_map(df)
+    sel = df[df["locale"] == locale]
+    if not sel.empty:
+        r = sel.iloc[0]
+        if pd.notna(r["latitude"]) and pd.notna(r["longitude"]):
+            fig.add_trace(go.Scattergeo(
+                lat=[r["latitude"]],
+                lon=[r["longitude"]],
+                mode="markers+text",
+                marker=dict(
+                    size=18,
+                    color="#1d4ed8",
+                    line=dict(color="white", width=2),
+                    symbol="star",
+                ),
+                text=[r["name"]],
+                textposition="top center",
+                textfont=dict(size=12, color="#1d4ed8"),
+                hovertext=(
+                    f"{r['name']} ({locale})<br>"
+                    f"Score: {r['score']:.4f} \u2014 {r['grade']}<br>"
+                    f"Family: {r['family']}"
+                ),
+                hoverinfo="text",
+                showlegend=False,
+            ))
+    return fig
+
+
+def render_language(model_name: str, locale: str):
+    """Render the language detail panel for one locale."""
+    if not model_name or not locale:
+        return "", go.Figure(), go.Figure()
+    data   = load_coverage(model_name)
+    df     = build_dataframe(data)
+    row_df = df[df["locale"] == locale]
+    if row_df.empty:
+        return f"<p>Language '<b>{locale}</b>' not found in coverage data.</p>", go.Figure(), go.Figure()
+    row = row_df.iloc[0]
+    return (
+        make_language_card_html(row, data),
+        make_language_tier_pie(row),
+        make_language_highlighted_map(df, locale),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main render function wired to every control
 # ---------------------------------------------------------------------------
 
@@ -506,7 +687,8 @@ def render(model_name: str):
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
         return ("", empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_fig, empty_fig, empty_df, empty_df)
+                empty_fig, empty_fig, empty_df, empty_df,
+                gr.update(choices=[], value=None))
 
     data = load_coverage(model_name)
     df   = build_dataframe(data)
@@ -516,7 +698,8 @@ def render(model_name: str):
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
         return (msg, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_fig, empty_fig, empty_df, empty_df)
+                empty_fig, empty_fig, empty_df, empty_df,
+                gr.update(choices=[], value=None))
 
     summary_html   = make_summary_html(data, df)
     grade_bar      = make_distribution_chart(df)
@@ -530,6 +713,12 @@ def render(model_name: str):
     incomplete_tbl = make_incomplete_table(df)
     full_tbl       = make_full_table(df)
 
+    lang_choices = [
+        (f"{r['name']} ({r['locale']})", r['locale'])
+        for _, r in df.sort_values("name").iterrows()
+    ]
+    first_locale = lang_choices[0][1] if lang_choices else None
+
     return (
         summary_html,
         grade_bar,
@@ -542,6 +731,7 @@ def render(model_name: str):
         fert_bar,
         incomplete_tbl,
         full_tbl,
+        gr.update(choices=lang_choices, value=first_locale),
     )
 
 
@@ -551,7 +741,7 @@ def render(model_name: str):
 
 models = list_models()
 
-_OUTPUTS_COUNT = 11  # must match number of return values in render()
+_OUTPUTS_COUNT = 12  # must match number of return values in render()
 
 with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
@@ -570,6 +760,15 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
             scale=3,
         )
         run_btn = gr.Button("Generate Report", variant="primary", scale=1)
+
+    with gr.Row():
+        language_dd = gr.Dropdown(
+            choices=[],
+            value=None,
+            label="Language (type to search)",
+            interactive=True,
+            scale=4,
+        )
 
     # ---- Summary ----
     summary_html = gr.HTML()
@@ -625,7 +824,16 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 "T0–T3 = character counts at each tier."
             )
             full_table = gr.Dataframe(interactive=False, wrap=False)
-
+        # ── Language Detail ───────────────────────────────────────────────
+        with gr.Tab("🔍 Language Detail"):
+            gr.Markdown(
+                "Select a language from the **Language** dropdown above to see a full breakdown: "
+                "tier distribution, problematic codepoints, fertility scores, and map location."
+            )
+            lang_card_html = gr.HTML()
+            with gr.Row():
+                lang_tier_pie = gr.Plot(label="Tier Distribution")
+                lang_map      = gr.Plot(label="Location on World Map")
     # ── Wire events ───────────────────────────────────────────────────────
 
     outputs = [
@@ -640,10 +848,18 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         fert_bar_plot,
         incomplete_table,
         full_table,
+        language_dd,
     ]
+
+    lang_outputs = [lang_card_html, lang_tier_pie, lang_map]
 
     run_btn.click(fn=render, inputs=[model_dd], outputs=outputs)
     model_dd.change(fn=render, inputs=[model_dd], outputs=outputs)
+    language_dd.change(
+        fn=render_language,
+        inputs=[model_dd, language_dd],
+        outputs=lang_outputs,
+    )
 
     # Auto-load on page open
     if models:
