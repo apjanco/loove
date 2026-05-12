@@ -11,3 +11,8 @@ requests>=2.31.0          # HTTP downloads for CLDR XML, UCD files, UDHR corpus
 
 # Utilities
 tqdm>=4.66.0              # Progress bars for bulk processing
+
+# Gradio dashboard (app.py / Hugging Face Spaces)
+gradio>=4.0.0             # Web UI framework
+plotly>=5.0.0             # Interactive charts
+pandas>=2.0.0             # Data manipulation

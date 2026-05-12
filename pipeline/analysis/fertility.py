@@ -8,12 +8,11 @@ character) means the model is falling back to individual bytes and has no
 real language-level understanding of the script.
 
 UDHR is freely available in ~500 languages and is the standard benchmark corpus
-for tokenizer fertility analysis.  Files live at:
-    https://unicode.org/udhr/d/udhr_{code}.txt
+for tokenizer fertility analysis.  Files are hosted on GitHub as XML:
+    https://raw.githubusercontent.com/eric-muller/udhr/main/data/udhr/udhr_{code}.xml
 
-The index XML (maps language codes → file codes) is at the unicode-org/udhr
-GitHub repo:
-    https://raw.githubusercontent.com/unicode-org/udhr/main/index/index.xml
+The index XML (maps language codes → file codes) lives at:
+    https://raw.githubusercontent.com/eric-muller/udhr/main/data/udhr/index.xml
 
 Index XML element format:
     <udhr f="hin" iso639-3="hin" iso15924="Deva" xml:lang="hi" ...>
@@ -24,7 +23,6 @@ first entry in document order (which is usually the most complete one).
 """
 from __future__ import annotations
 
-import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -35,9 +33,11 @@ import requests
 _ROOT = Path(__file__).parents[2]
 _CACHE_DIR = _ROOT / "data" / "udhr"
 _INDEX_URL = (
-    "https://raw.githubusercontent.com/unicode-org/udhr/main/index/index.xml"
+    "https://raw.githubusercontent.com/eric-muller/udhr/main/data/udhr/index.xml"
 )
-_UDHR_TEXT_BASE = "https://unicode.org/udhr/d"
+_UDHR_XML_BASE = (
+    "https://raw.githubusercontent.com/eric-muller/udhr/main/data/udhr"
+)
 
 # Lazy-loaded index: locale_prefix (e.g. "hi") → UDHR file code (e.g. "hin")
 _LOCALE_TO_FILE: dict[str, str] | None = None
@@ -73,14 +73,12 @@ def _load_index() -> dict[str, str]:
         _LOCALE_TO_FILE = mapping
         return mapping
 
-    # xml:lang uses the XML namespace URI
-    _XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
-
     for elem in root.iter("udhr"):
         file_code = elem.get("f") or elem.get("id", "")
-        xml_lang  = elem.get(_XML_LANG, "")
-        # xml:lang may be "hi", "zh-Hant", "sr-Latn" — use the primary subtag
-        locale_prefix = xml_lang.split("-")[0] if xml_lang else ""
+        # New index format uses bcp47 attribute (e.g. "hi", "zh-Hant", "sr-Latn")
+        bcp47 = elem.get("bcp47", "")
+        # Use the primary language subtag to align with CLDR locale keys
+        locale_prefix = bcp47.split("-")[0] if bcp47 else ""
         if file_code and locale_prefix and locale_prefix not in mapping:
             mapping[locale_prefix] = file_code
 
@@ -97,13 +95,13 @@ def get_available_locales() -> list[str]:
 # UDHR text fetch
 # ---------------------------------------------------------------------------
 
-def _fetch_udhr_text(file_code: str) -> str | None:
-    """Download and cache a UDHR plain-text file."""
-    cache_path = _CACHE_DIR / f"{file_code}.txt"
+def _fetch_udhr_xml(file_code: str) -> str | None:
+    """Download and cache a UDHR XML file."""
+    cache_path = _CACHE_DIR / f"{file_code}.xml"
     if cache_path.exists():
         return cache_path.read_text(encoding="utf-8", errors="replace")
 
-    url = f"{_UDHR_TEXT_BASE}/udhr_{file_code}.txt"
+    url = f"{_UDHR_XML_BASE}/udhr_{file_code}.xml"
     try:
         resp = requests.get(url, timeout=20)
         if resp.status_code == 404:
@@ -117,36 +115,28 @@ def _fetch_udhr_text(file_code: str) -> str | None:
         return None
 
 
-def _extract_body(text: str, max_chars: int = 4000) -> str:
+def _extract_body(xml_text: str, max_chars: int = 4000) -> str:
     """
-    Strip the UDHR file header and return up to `max_chars` characters of body.
+    Extract article/paragraph text from a UDHR XML file.
 
-    UDHR plain-text files begin with a header section (copyright, language info)
-    before the actual Declaration text.  The body typically starts at "Preamble"
-    or "Article 1" / a numbered article heading.
+    The UDHR XML schema has <preamble>, <article>, <para>, and <title>
+    elements.  We collect all <para> and <title> text nodes, skipping the
+    top-level <udhr> header attributes which carry metadata, not body text.
     """
-    lines = text.splitlines()
-    body_lines: list[str] = []
-    in_header = True
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return ""
 
-    for line in lines:
-        stripped = line.strip()
-        if in_header:
-            # Heuristic: body starts when we see a line that looks like an article
-            # heading or the Preamble.  Header lines are often copyright notices,
-            # blank, or contain "UDHR".
-            if re.match(r"^(Preamble|Article|ARTICLE|\d+\.)\b", stripped):
-                in_header = False
-            elif stripped and not any(
-                stripped.startswith(pfx)
-                for pfx in ("©", "#", "UDHR", "Universal Declaration", "United Nations")
-            ):
-                in_header = False
+    parts: list[str] = []
+    # Collect text from <title> and <para> elements anywhere in the document
+    for elem in root.iter():
+        if elem.tag in ("title", "para") and elem.text:
+            stripped = elem.text.strip()
+            if stripped:
+                parts.append(stripped)
 
-        if not in_header and stripped:
-            body_lines.append(stripped)
-
-    body = " ".join(body_lines)
+    body = " ".join(parts)
     return body[:max_chars]
 
 
@@ -181,7 +171,7 @@ def compute_fertility(
     if not file_code:
         return None
 
-    raw_text = _fetch_udhr_text(file_code)
+    raw_text = _fetch_udhr_xml(file_code)
     if not raw_text:
         return None
 
@@ -218,4 +208,4 @@ def prefetch_all(locale_ids: list[str]) -> None:
     for locale_id in locale_ids:
         file_code = index.get(locale_id)
         if file_code:
-            _fetch_udhr_text(file_code)
+            _fetch_udhr_xml(file_code)

@@ -39,7 +39,10 @@ from pathlib import Path
 
 import requests
 from babel import Locale, UnknownLocaleError
-from babel.core import locale_identifiers
+try:
+    from babel.core import locale_identifiers
+except ImportError:
+    from babel.localedata import locale_identifiers
 
 # ---------------------------------------------------------------------------
 # Paths and constants
