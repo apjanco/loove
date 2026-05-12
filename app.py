@@ -549,14 +549,7 @@ models = list_models()
 
 _OUTPUTS_COUNT = 11  # must match number of return values in render()
 
-with gr.Blocks(
-    title="LLM Vocabulary Coverage Dashboard",
-    theme=gr.themes.Soft(),
-    css="""
-        .plot-container { border-radius: 8px; }
-        footer { display: none !important; }
-    """,
-) as demo:
+with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
     gr.Markdown(
         "# 🌍 LLM Vocabulary Coverage Dashboard\n"
@@ -654,4 +647,8 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(
+        theme=gr.themes.Soft(),
+        css=".plot-container { border-radius: 8px; } footer { display: none !important; }",
+        ssr_mode=False,
+    )
