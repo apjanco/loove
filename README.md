@@ -1,3 +1,14 @@
+---
+title: LLM Vocabulary Coverage Dashboard
+emoji: 🌍
+colorFrom: green
+colorTo: blue
+sdk: gradio
+sdk_version: "6.14.0"
+app_file: app.py
+pinned: false
+---
+
 <img height="200" src="loove-image.jpg" />
 
 # Loove — LLM Language Coverage Dashboard
