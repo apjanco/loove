@@ -819,16 +819,215 @@ def make_model_comparison_chart(locale: str, lang_name: str) -> go.Figure:
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Interactive tokenization demo
+# ---------------------------------------------------------------------------
+
+# "The quick brown fox …" translated into many scripts for instant demos
+_SAMPLE_TEXTS: dict[str, str] = {
+    "en":  "The quick brown fox jumps over the lazy dog.",
+    "fr":  "Le renard brun rapide saute par-dessus le chien paresseux.",
+    "de":  "Der schnelle braune Fuchs springt über den faulen Hund.",
+    "es":  "El rápido zorro marrón salta sobre el perro perezoso.",
+    "pt":  "A rápida raposa marrom pula sobre o cão preguiçoso.",
+    "it":  "La veloce volpe marrone salta sopra il cane pigro.",
+    "nl":  "De snelle bruine vos springt over de luie hond.",
+    "ru":  "Быстрая коричневая лисица перепрыгнула через ленивую собаку.",
+    "uk":  "Швидка коричнева лисиця перестрибнула через ледачого пса.",
+    "pl":  "Szybki brązowy lis przeskoczył nad leniwym psem.",
+    "ar":  "الثعلب البني السريع يقفز فوق الكلب الكسول.",
+    "he":  "השועל החום המהיר קפץ מעל הכלב העצלן.",
+    "fa":  "روباه قهوه‌ای سریع از روی سگ تنبل پرید.",
+    "zh":  "那只敏捷的棕色狐狸跳过了那只懒惰的狗。",
+    "ja":  "素早い茶色のキツネは怠け者の犬を飛び越えた。",
+    "ko":  "빠른 갈색 여우가 게으른 개를 뛰어넘었다.",
+    "hi":  "तेज़ भूरी लोमड़ी आलसी कुत्ते के ऊपर कूदी।",
+    "bn":  "দ্রুত বাদামী শিয়াল অলস কুকুরের উপর দিয়ে লাফিয়ে গেল।",
+    "pa":  "ਤੇਜ਼ ਭੂਰੀ ਲੂੰਬੜੀ ਆਲਸੀ ਕੁੱਤੇ ਉੱਤੇ ਛਾਲ ਮਾਰ ਗਈ।",
+    "gu":  "ઝડપી ભૂરી શિયાળ આળસુ કૂતરા પર કૂદી.",
+    "ta":  "வேகமான பழுப்பு நிற நரி சோம்பேறி நாய் மீது தாண்டியது.",
+    "te":  "వేగవంతమైన గోధుమ రంగు నక్క సోమరి కుక్క మీదుగా దూకింది.",
+    "kn":  "ವೇಗದ ಕಂದು ನರಿ ಸೋಮಾರಿ ನಾಯಿಯ ಮೇಲೆ ಹಾರಿತು.",
+    "ml":  "വേഗമേറിയ തവിട്ടുനിറമുള്ള കുറുക്കൻ മടിയനായ നായ്ക്കു മേൽ ചാടി.",
+    "or":  "ଦ୍ରୁତ ବାଦାମୀ ଶିଆଳ ଅଳସୁଆ କୁକୁର ଉପରୁ ଡେଇଁ ଗଲା।",
+    "ne":  "छिटो खैरो स्याल अल्छी कुकुरमाथि उफ्रियो।",
+    "si":  "ශීඝ්‍ර දුඹුරු හිවල් කම්මැලි බල්ලා හා පනිනවා.",
+    "am":  "ፈጣኑ ቡናማ ቀበሮ ሰነፉ ውሻ ላይ ዘለለ።",
+    "th":  "สุนัขจิ้งจอกสีน้ำตาลที่ว่องไวกระโดดข้ามสุนัขขี้เกียจ",
+    "my":  "လျင်မြန်သောအညိုရောင်မြေခွေးသည် ပျင်းရိသောခွေးကိုကျော်ခုန်သွားသည်။",
+    "km":  "កញ្ជ្រោងពណ៌ត្នោតរហ័សលោតឆ្លងផ្ទៃឆ្កែខ្ជិល។",
+    "lo":  "ໝາປ່າສີນ້ຳຕານໄວ ໂດດຂ້າມໝາຂີ້ຄ້ານ.",
+    "bo":  "རྒྱང་མགོ་གཤོག་ལྡན་གྱི་སྤྱང་ཀི་གཉིད་ལྟོག་ལ་ཚར་བ་བྱུང་།",
+    "mn":  "Хурдан хүрэн үнэг залхуу нохойн дээгүүр үсрэв.",
+    "ka":  "სწრაფი ყავისფერი მელა ზარმაც ძაღლს გადაეხტა.",
+    "hy":  "Արագ շագанakaferi աղвесы ছাটকেছ ছয়লা শান ভровоу",
+    "el":  "Η γρήγορη καφέ αλεπού πήδηξε πάνω από τον τεμπέλη σκύλο.",
+    "tr":  "Hızlı kahverengi tilki tembel köpeğin üzerinden atladı.",
+    "vi":  "Con cáo nâu nhanh nhẹn nhảy qua con chó lười biếng.",
+}
+
+_TIER_BG = {
+    "t0": ("#dcfce7", "#166534", "Tier 0 — native token"),
+    "t1": ("#fef9c3", "#713f12", "Tier 1 — embedded in larger token"),
+    "t2": ("#ffedd5", "#9a3412", "Tier 2 — byte-fallback"),
+    "t3": ("#fee2e2", "#7f1d1d", "Tier 3 — UNREACHABLE"),
+}
+
+
+def _extract_locale(locale: str) -> str:
+    """Handle 'Name (locale)' labels that Gradio may pass with allow_custom_value."""
+    m = re.search(r'\(([^)]+)\)\s*$', locale or "")
+    return m.group(1) if m else (locale or "")
+
+
+def get_demo_sample(locale: str) -> str:
+    return _SAMPLE_TEXTS.get(_extract_locale(locale), "")
+
+
+def make_demo_html(model_name: str, locale: str, user_text: str) -> str:
+    """Render char-by-char tier annotation with token cost explanation."""
+    locale = _extract_locale(locale)
+    if not model_name or not locale or not (user_text or "").strip():
+        return ""
+
+    data = load_coverage(model_name)
+    lang_data = data["languages"].get(locale, {})
+    if not lang_data:
+        return f"<p>Locale <b>{locale}</b> not found for model <b>{model_name}</b>.</p>"
+
+    main = lang_data.get("main") or {}
+    lang_name = lang_data.get("name", locale)
+    has_byte_fallback = data.get("has_byte_fallback", False)
+
+    tier1_set = set(main.get("tier1", []))
+    tier2_set = set(main.get("tier2", []))
+    tier3_set = set(main.get("tier3", []))
+
+    counts = {"t0": 0, "t1": 0, "t2": 0, "t3": 0}
+    parts = []
+    t3_chars_seen: list[str] = []
+
+    for char in user_text:
+        cp = ord(char)
+        if char in (" ", "\n", "\t", "\r"):
+            parts.append(f"<span style='white-space:pre'>{char if char != '\n' else '<br>'}</span>")
+            continue
+        if cp in tier3_set:
+            tier = "t3"
+            if char not in t3_chars_seen:
+                t3_chars_seen.append(char)
+        elif cp in tier2_set:
+            tier = "t2"
+        elif cp in tier1_set:
+            tier = "t1"
+        else:
+            tier = "t0"
+        counts[tier] += 1
+        bg, fg, label = _TIER_BG[tier]
+        safe = char.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        tip = f"U+{cp:04X} ({safe}) — {label}"
+        parts.append(
+            f'<span style="background:{bg};color:{fg};border-radius:4px;'
+            f'padding:2px 3px;margin:1px;display:inline-block;cursor:help" '
+            f'title="{tip}">{safe}</span>'
+        )
+
+    coverage_score = main.get("weighted_score", 0.0)
+    grade = coverage_grade(coverage_score)
+    grade_color = GRADE_COLORS.get(grade, "#6b7280")
+
+    total_chars = counts["t0"] + counts["t1"] + counts["t2"] + counts["t3"]
+    # Rough token estimates: native ~4 chars/token, byte-fallback ~3 tokens/char
+    native_est  = max(1, (counts["t0"] + counts["t1"]) // 4)
+    fallback_est = counts["t2"] * 3
+    total_est   = native_est + fallback_est
+    # English baseline for same length: roughly 1 token / 4 chars
+    eng_est = max(1, total_chars // 4)
+    overhead_x  = round(total_est / eng_est, 1) if eng_est else 1
+
+    # Alerts
+    t3_block = ""
+    if counts["t3"] > 0:
+        chars_str = ", ".join(
+            f'<code>U+{ord(c):04X} {c}</code>' for c in t3_chars_seen[:10]
+        )
+        t3_block = (
+            f'<div style="background:#fef2f2;border-left:4px solid #ef4444;'
+            f'padding:12px 16px;margin-top:12px;border-radius:0 8px 8px 0">'
+            f'<strong>⛔ {counts["t3"]} unreachable character(s) detected</strong><br>'
+            f'This model has <b>no byte-fallback</b>. The characters {chars_str} '
+            f'cannot be encoded by this tokenizer at all. In practice they are '
+            f'silently dropped, corrupted, or cause runtime errors — '
+            f'making it impossible for the model to faithfully read or reproduce {lang_name} text.</div>'
+        )
+
+    t2_block = ""
+    if counts["t2"] > 0:
+        t2_block = (
+            f'<div style="background:#fff7ed;border-left:4px solid #f97316;'
+            f'padding:12px 16px;margin-top:12px;border-radius:0 8px 8px 0">'
+            f'<strong>⚠ {counts["t2"]} byte-fallback character(s)</strong><br>'
+            f'These characters are absent from the vocabulary. The tokenizer '
+            f'encodes each as a sequence of raw UTF-8 byte tokens '
+            f'(e.g. the Amharic letter <code>አ</code> becomes '
+            f'<code>&lt;0xe1&gt;&lt;0x8a&gt;&lt;0xa0&gt;</code> — 3 tokens). '
+            f'The model must reconstruct meaning from byte sequences it has seen '
+            f'only rarely during training, severely limiting comprehension. '
+            f'Estimated cost: <b>~{fallback_est} extra tokens</b> '
+            f'({overhead_x}× an equivalent English text).</div>'
+        )
+
+    t0_block = ""
+    if counts["t2"] == 0 and counts["t3"] == 0:
+        t0_block = (
+            f'<div style="background:#f0fdf4;border-left:4px solid #22c55e;'
+            f'padding:12px 16px;margin-top:12px;border-radius:0 8px 8px 0">'
+            f'<strong>✓ Excellent coverage for {lang_name}</strong><br>'
+            f'Every character in this text is natively tokenized. '
+            f'The model can process {lang_name} as efficiently as English '
+            f'— subword tokens capture meaningful linguistic units directly.</div>'
+        )
+
+    legend_html = " &nbsp;".join(
+        f'<span style="background:{bg};color:{fg};padding:3px 10px;'
+        f'border-radius:999px;font-size:0.82em">{label}</span>'
+        for _, (bg, fg, label) in _TIER_BG.items()
+    )
+
+    return f"""
+<div style="font-family:sans-serif;max-width:920px">
+  <div style="margin-bottom:10px;line-height:2">{legend_html}</div>
+  <div style="padding:18px;background:#f8fafc;border-radius:10px;
+              font-size:1.45em;line-height:2.8;word-break:break-all;
+              border:1px solid #e2e8f0;min-height:60px">
+    {''.join(parts)}
+  </div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px;font-size:0.88em;
+              align-items:center">
+    <span style="background:#dcfce7;padding:3px 12px;border-radius:999px">
+      ✓ {counts['t0']} native</span>
+    <span style="background:#fef9c3;padding:3px 12px;border-radius:999px">
+      ~ {counts['t1']} embedded</span>
+    <span style="background:#ffedd5;padding:3px 12px;border-radius:999px">
+      ⚠ {counts['t2']} byte-fallback (~{fallback_est} tokens)</span>
+    <span style="background:#fee2e2;padding:3px 12px;border-radius:999px">
+      ✗ {counts['t3']} unreachable</span>
+    <span style="color:#94a3b8">|</span>
+    <span>Model coverage score: <b style="color:{grade_color}">{coverage_score:.3f}</b>
+      &nbsp;<span style="background:{grade_color};color:white;padding:2px 10px;
+      border-radius:999px;font-size:0.9em">{grade}</span></span>
+  </div>
+  {t3_block}{t2_block}{t0_block}
+</div>
+"""
+
+
 def render_language(model_name: str, locale: str):
     """Render the language detail panel for one locale."""
     if not model_name or not locale:
         return "", "", go.Figure(), go.Figure(), go.Figure()
     # When allow_custom_value=True Gradio may pass the display label
-    # e.g. "Bosnian (bs)" instead of the raw locale code "bs".
-    # Extract the code from parentheses if needed.
-    m = re.search(r'\(([^)]+)\)\s*$', locale)
-    if m:
-        locale = m.group(1)
+    locale = _extract_locale(locale)
     data   = load_coverage(model_name)
     df     = build_dataframe(data)
     row_df = df[df["locale"] == locale]
@@ -1032,6 +1231,36 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 "First selection may take a moment to load comparison data for all models."
             )
             lang_comparison_plot = gr.Plot(label="Model Comparison")
+
+        # ── Tokenization Demo ─────────────────────────────────────────────
+        with gr.Tab("🔤 Tokenization Demo"):
+            gr.Markdown(
+                "**See exactly how this model tokenizes text in any language.** "
+                "Each character is highlighted by its tier:\n\n"
+                "- 🟢 **Tier 0 — native**: the character (or a subword containing it) "
+                "exists directly in the vocabulary. Efficient, well-understood.\n"
+                "- 🟡 **Tier 1 — embedded**: the character only appears inside "
+                "longer multi-character tokens, never as a standalone token.\n"
+                "- 🟠 **Tier 2 — byte fallback**: NOT in the vocabulary. "
+                "The tokenizer splits it into raw UTF-8 bytes "
+                "(e.g. `አ` → `<0xe1><0x8a><0xa0>`, 3 tokens instead of 1). "
+                "The model sees bytes, not meaningful script units.\n"
+                "- 🔴 **Tier 3 — unreachable**: the model has no byte-fallback "
+                "and cannot represent this character at all.\n\n"
+                "Select a language from the **Language** dropdown above — "
+                "a sample sentence is loaded automatically. "
+                "You can replace it with any text."
+            )
+            with gr.Row():
+                demo_text_box = gr.Textbox(
+                    label="Text to analyze",
+                    placeholder="Select a language above for a sample, or paste your own text…",
+                    lines=3,
+                    scale=4,
+                )
+                demo_btn = gr.Button("Analyze", variant="primary", scale=1, min_width=120)
+            demo_html_out = gr.HTML()
+
     # ── Wire events ───────────────────────────────────────────────────────
 
     outputs = [
@@ -1054,10 +1283,24 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
     run_btn.click(fn=render, inputs=[model_dd], outputs=outputs)
     model_dd.change(fn=render, inputs=[model_dd], outputs=outputs)
+    # Also clear demo output when model changes (stale analysis)
+    model_dd.change(fn=lambda _: "", inputs=[model_dd], outputs=[demo_html_out])
     language_dd.change(
         fn=render_language,
         inputs=[model_dd, language_dd],
         outputs=lang_outputs,
+    )
+    # Auto-fill sample text + run demo when language changes
+    language_dd.change(
+        fn=lambda loc: (get_demo_sample(loc), ""),
+        inputs=[language_dd],
+        outputs=[demo_text_box, demo_html_out],
+    )
+    # Analyze button
+    demo_btn.click(
+        fn=make_demo_html,
+        inputs=[model_dd, language_dd, demo_text_box],
+        outputs=[demo_html_out],
     )
 
     # Auto-load on page open
