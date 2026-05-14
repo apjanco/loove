@@ -228,13 +228,26 @@ def make_tier_stacked_bar(df: pd.DataFrame) -> go.Figure:
     """
     Stacked percentage bar chart of tier character counts per language,
     sorted by coverage score. Only the 60 worst languages are shown to
-    keep the chart readable.
+    keep the chart readable. Hover on Tier-2/3 bars shows the actual
+    problematic characters.
     """
     worst = df.nsmallest(60, "score").copy()
     worst = worst.sort_values("score", ascending=True)
 
     totals = worst[["tier0", "tier1", "tier2", "tier3"]].sum(axis=1).clip(lower=1)
     labels = worst["name"] + " (" + worst["locale"] + ")"
+
+    def _fmt_hover(cps: list, limit: int = 14) -> str:
+        if not cps:
+            return "none"
+        chars = []
+        for cp in cps[:limit]:
+            try:
+                chars.append(f"{chr(cp)}\u2009U+{cp:04X}")
+            except (ValueError, OverflowError):
+                chars.append(f"U+{cp:04X}")
+        extra = f"\u2026 +{len(cps) - limit} more" if len(cps) > limit else ""
+        return ",  ".join(chars) + ("  " + extra if extra else "")
 
     fig = go.Figure()
     for tier, color, label in zip(
@@ -243,17 +256,29 @@ def make_tier_stacked_bar(df: pd.DataFrame) -> go.Figure:
         ["Tier 0 — native token", "Tier 1 — embedded", "Tier 2 — byte fallback", "Tier 3 — unreachable"],
     ):
         pct = worst[tier] / totals * 100
+
+        if tier == "tier2":
+            custom = worst["tier2_cps"].apply(_fmt_hover).tolist()
+            hover = "%{x}<br>" + label + ": %{y:.1f}%<br>Chars: %{customdata}<extra></extra>"
+        elif tier == "tier3":
+            custom = worst["tier3_cps"].apply(_fmt_hover).tolist()
+            hover = "%{x}<br>" + label + ": %{y:.1f}%<br>Chars: %{customdata}<extra></extra>"
+        else:
+            custom = ["" for _ in range(len(worst))]
+            hover = "%{x}<br>" + label + ": %{y:.1f}%<extra></extra>"
+
         fig.add_trace(go.Bar(
             name=label,
             x=labels,
             y=pct,
             marker_color=color,
-            hovertemplate="%{x}<br>" + label + ": %{y:.1f}%<extra></extra>",
+            customdata=custom,
+            hovertemplate=hover,
         ))
 
     fig.update_layout(
         barmode="stack",
-        title="Character-Tier Breakdown — 60 Lowest-Scoring Languages",
+        title="Character-Tier Breakdown — 60 Lowest-Scoring Languages (hover Tier-2/3 bars to see missing characters)",
         xaxis=dict(tickangle=-45),
         yaxis=dict(title="% of Characters", range=[0, 100]),
         plot_bgcolor="white",
@@ -261,6 +286,34 @@ def make_tier_stacked_bar(df: pd.DataFrame) -> go.Figure:
         height=520,
     )
     return fig
+
+
+def make_tier_detail_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Table of the 60 worst-scoring languages with their problematic characters listed."""
+    worst = df.nsmallest(60, "score").copy()
+
+    def _fmt(cps: list, limit: int = 20) -> str:
+        if not cps:
+            return "—"
+        chars = []
+        for cp in cps[:limit]:
+            try:
+                chars.append(f"{chr(cp)} (U+{cp:04X})")
+            except (ValueError, OverflowError):
+                chars.append(f"U+{cp:04X}")
+        extra = f"  +{len(cps) - limit} more" if len(cps) > limit else ""
+        return "  ".join(chars) + extra
+
+    out = worst[["name", "locale", "score", "grade", "tier2", "tier3",
+                 "tier2_cps", "tier3_cps"]].copy()
+    out["Byte-Fallback Characters"] = out["tier2_cps"].apply(_fmt)
+    out["Unreachable Characters"]   = out["tier3_cps"].apply(_fmt)
+    out = out.drop(columns=["tier2_cps", "tier3_cps"])
+    out.columns = [
+        "Language", "Locale", "Score", "Grade", "T2 Count", "T3 Count",
+        "Byte-Fallback Characters", "Unreachable Characters",
+    ]
+    return out.sort_values("Score").reset_index(drop=True)
 
 
 def make_world_map(df: pd.DataFrame) -> go.Figure:
@@ -796,8 +849,9 @@ def render(model_name: str):
     if not model_name:
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
-        return ("", empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_fig, empty_fig, empty_df, empty_df,
+        return ("", empty_fig, empty_fig, empty_fig, empty_df,
+                empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
+                empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
     data = load_coverage(model_name)
@@ -807,21 +861,23 @@ def render(model_name: str):
         msg = f"<p>No CLDR language data found in coverage file for <b>{model_name}</b>.</p>"
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
-        return (msg, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_fig, empty_fig, empty_df, empty_df,
+        return (msg, empty_fig, empty_fig, empty_fig, empty_df,
+                empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
+                empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
-    summary_html   = make_summary_html(data, df)
-    grade_bar      = make_distribution_chart(df)
-    score_hist     = make_score_histogram(df)
-    tier_bar       = make_tier_stacked_bar(df)
-    world_map      = make_world_map(df)
-    macroarea_bar  = make_macroarea_chart(df)
-    family_bar     = make_family_chart(df)
-    fert_scatter   = make_fertility_scatter(df)
-    fert_bar       = make_fertility_bar(df)
-    incomplete_tbl = make_incomplete_table(df)
-    full_tbl       = make_full_table(df)
+    summary_html      = make_summary_html(data, df)
+    grade_bar         = make_distribution_chart(df)
+    score_hist        = make_score_histogram(df)
+    tier_bar          = make_tier_stacked_bar(df)
+    tier_detail_tbl   = make_tier_detail_table(df)
+    world_map         = make_world_map(df)
+    macroarea_bar     = make_macroarea_chart(df)
+    family_bar        = make_family_chart(df)
+    fert_scatter      = make_fertility_scatter(df)
+    fert_bar          = make_fertility_bar(df)
+    incomplete_tbl    = make_incomplete_table(df)
+    full_tbl          = make_full_table(df)
 
     lang_choices = [
         (f"{r['name']} ({r['locale']})", r['locale'])
@@ -834,6 +890,7 @@ def render(model_name: str):
         grade_bar,
         score_hist,
         tier_bar,
+        tier_detail_tbl,
         world_map,
         macroarea_bar,
         family_bar,
@@ -853,7 +910,7 @@ models = list_models()
 _PREFERRED_DEFAULTS = ["gpt-4o", "gpt-4", "meta-llama/Llama-3.1-8B", "mistralai/Mistral-7B-v0.3"]
 _default_model = next((m for m in _PREFERRED_DEFAULTS if m in models), models[0] if models else None)
 
-_OUTPUTS_COUNT = 12  # must match number of return values in render()
+_OUTPUTS_COUNT = 13  # must match number of return values in render()
 
 with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
@@ -896,6 +953,16 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 grade_bar_plot = gr.Plot(label="Grades")
                 score_hist_plot = gr.Plot(label="Score Distribution")
             tier_bar_plot = gr.Plot(label="Tier Breakdown (60 lowest-scoring)")
+            gr.Markdown(
+                "**Hover over the orange (Tier-2) or red (Tier-3) bars** to see the exact "
+                "characters that are only reachable via byte-fallback or are completely unreachable. "
+                "The table below lists them explicitly."
+            )
+            tier_detail_table = gr.Dataframe(
+                label="Problematic Characters — 60 Lowest-Scoring Languages",
+                interactive=False,
+                wrap=True,
+            )
 
         # ── World Map ─────────────────────────────────────────────────────
         with gr.Tab("🗺️ World Map"):
@@ -964,6 +1031,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         grade_bar_plot,
         score_hist_plot,
         tier_bar_plot,
+        tier_detail_table,
         world_map_plot,
         macroarea_plot,
         family_plot,
