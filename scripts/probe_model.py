@@ -113,6 +113,14 @@ _LOCALE_TO_UDHR: dict[str, str] = {
 # Expected script keywords per locale (for Test 2)
 # ---------------------------------------------------------------------------
 _LOCALE_SCRIPT: dict[str, str] = {
+    # Latin-script languages (needed so control locales get a script verdict)
+    "en":  "latin",      "es":  "latin",      "fr":  "latin",
+    "de":  "latin",      "pt":  "latin",      "it":  "latin",
+    "nl":  "latin",      "pl":  "latin",      "ro":  "latin",
+    "sv":  "latin",      "da":  "latin",      "fi":  "latin",
+    "no":  "latin",      "cs":  "latin",      "sk":  "latin",
+    "tr":  "latin",      "id":  "latin",      "vi":  "latin",
+    # Non-Latin scripts
     "am":  "ethiopic",   "ti":  "ethiopic",
     "ar":  "arabic",     "fa":  "arabic",     "ur":  "arabic",
     "ug":  "arabic",     "ps":  "arabic",
@@ -144,6 +152,9 @@ _LOCALE_SCRIPT: dict[str, str] = {
     "zgh": "tifinagh",
     "vai": "vai",
 }
+
+# Alternative keywords Claude uses to identify the Latin/Roman alphabet
+_LATIN_SCRIPT_KEYWORDS = frozenset({"latin", "roman", "alphabet", "latin alphabet", "latin script"})
 
 # ---------------------------------------------------------------------------
 # Fallback sentences (used when no UDHR file exists)
@@ -240,14 +251,18 @@ def _probe_sentence(locale: str) -> str:
 
 
 def _char_fidelity(original: str, response: str) -> float:
-    """Ratio of original non-whitespace characters reproduced in response."""
+    """Proportion of original non-whitespace characters reproduced in response.
+
+    Uses matched_chars / len(original) rather than SequenceMatcher.ratio()
+    so that model preamble/postamble does not penalise the score.
+    """
     orig_clean = "".join(c for c in original if not c.isspace())
     if not orig_clean:
         return 1.0
     resp_clean = "".join(c for c in response if not c.isspace())
-    return difflib.SequenceMatcher(
-        None, orig_clean, resp_clean, autojunk=False
-    ).ratio()
+    matcher = difflib.SequenceMatcher(None, orig_clean, resp_clean, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(orig_clean)
 
 
 def _has_byte_artifacts(text: str) -> bool:
@@ -434,18 +449,31 @@ def probe_locale(
     )
     if script_err or not expected_script:
         script_recognized = None  # unknown
+    elif expected_script == "latin":
+        # Models may say "Latin", "Roman", "Latin alphabet", etc.
+        script_recognized = any(
+            kw in script_resp.lower() for kw in _LATIN_SCRIPT_KEYWORDS
+        )
     else:
         script_recognized = expected_script.lower() in script_resp.lower()
 
     # ── Test 3: Translation ───────────────────────────────────────────
-    trans_resp, trans_err = call(
-        f"Translate the following {lang_name} text into English. "
-        f"If you cannot understand the text, say so explicitly:\n\n{probe_text}"
-    )
-    if trans_err:
-        translation_refused = True
+    # Skip translation for English — translating English→English is nonsensical
+    # and causes models to refuse ("cannot translate, already in English"),
+    # producing a false failure on the refusal regex.
+    if locale == "en":
+        trans_resp = "[skipped — source language is English]"
+        trans_err = None
+        translation_refused = False
     else:
-        translation_refused = bool(_REFUSAL_RE.search(trans_resp))
+        trans_resp, trans_err = call(
+            f"Translate the following {lang_name} text into English. "
+            f"If you cannot understand the text, say so explicitly:\n\n{probe_text}"
+        )
+        if trans_err:
+            translation_refused = True
+        else:
+            translation_refused = bool(_REFUSAL_RE.search(trans_resp))
 
     # ── Verdict ───────────────────────────────────────────────────────
     if fidelity >= 0.95 and script_recognized and not translation_refused:
