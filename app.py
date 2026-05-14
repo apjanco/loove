@@ -10,6 +10,7 @@ Pre-compute coverage files with:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import gradio as gr
@@ -822,6 +823,12 @@ def render_language(model_name: str, locale: str):
     """Render the language detail panel for one locale."""
     if not model_name or not locale:
         return "", "", go.Figure(), go.Figure(), go.Figure()
+    # When allow_custom_value=True Gradio may pass the display label
+    # e.g. "Bosnian (bs)" instead of the raw locale code "bs".
+    # Extract the code from parentheses if needed.
+    m = re.search(r'\(([^)]+)\)\s*$', locale)
+    if m:
+        locale = m.group(1)
     data   = load_coverage(model_name)
     df     = build_dataframe(data)
     row_df = df[df["locale"] == locale]
@@ -936,6 +943,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
             value=None,
             label="Language (type to search)",
             interactive=True,
+            allow_custom_value=True,
             scale=4,
         )
 
