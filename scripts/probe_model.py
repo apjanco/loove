@@ -349,6 +349,7 @@ def _call_openai(
     model: str,
     messages: list[dict],
     timeout: int = 60,
+    extra_headers: dict[str, str] | None = None,
 ) -> str:
     """Call an OpenAI-compatible chat completion endpoint."""
     import urllib.request
@@ -359,13 +360,16 @@ def _call_openai(
         "max_tokens": 400,
         "temperature": 0,
     }).encode()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -412,6 +416,7 @@ def probe_locale(
     model: str,
     timeout: int,
     pause: float,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict:
     """Run the 3-test battery for one locale. Returns a result dict."""
 
@@ -425,7 +430,9 @@ def probe_locale(
                 return _call_gemini(api_key, model, prompt, timeout), None
             else:
                 msgs = [{"role": "user", "content": prompt}]
-                return _call_openai(api_key, base_url, model, msgs, timeout), None
+                return _call_openai(
+                    api_key, base_url, model, msgs, timeout, extra_headers
+                ), None
         except Exception as exc:
             return "", str(exc)
 
@@ -590,6 +597,12 @@ def main() -> None:
              "list as a sanity check. Pass --controls with no arguments to "
              "disable. Default: en es fr de zh ja ar ru hi ko",
     )
+    parser.add_argument(
+        "--extra-headers", default=None, metavar="JSON",
+        help='Extra HTTP headers as a JSON object, e.g. '
+             '\'{"x-portkey-api-key": "pk-...", "x-portkey-provider": "anthropic"}\'. '
+             'Useful for gateway proxies like Portkey that require custom headers.',
+    )
     args = parser.parse_args()
 
     # ── API key resolution ─────────────────────────────────────────────
@@ -605,6 +618,17 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # ── Extra headers ──────────────────────────────────────────────────
+    extra_headers: dict[str, str] | None = None
+    if args.extra_headers:
+        try:
+            extra_headers = json.loads(args.extra_headers)
+            if not isinstance(extra_headers, dict):
+                raise ValueError("must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"[!] --extra-headers is not valid JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # ── Locale selection ───────────────────────────────────────────────
     name_map = _build_name_map()
@@ -671,6 +695,7 @@ def main() -> None:
                 model=args.model,
                 timeout=args.timeout,
                 pause=args.pause,
+                extra_headers=extra_headers,
             )
             result["median_known_score"] = round(med_score, 4)
             result["is_control"] = locale in control_locales_set
