@@ -1146,6 +1146,7 @@ def make_probe_table(stem: str) -> pd.DataFrame:
             rows.append({
                 "Locale": locale,
                 "Language": r.get("lang_name", locale),
+                "Control": "✓" if r.get("is_control") else "",
                 "Verdict": "Error",
                 "Fidelity": "",
                 "Script OK": "",
@@ -1158,6 +1159,7 @@ def make_probe_table(stem: str) -> pd.DataFrame:
             rows.append({
                 "Locale": locale,
                 "Language": r.get("lang_name", locale),
+                "Control": "✓" if r.get("is_control") else "",
                 "Verdict": r.get("verdict", ""),
                 "Fidelity": f"{r['echo_fidelity']:.0%}",
                 "Script OK": "yes" if r.get("script_recognized") else (

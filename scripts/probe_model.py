@@ -258,6 +258,16 @@ def _has_byte_artifacts(text: str) -> bool:
     ))
 
 
+# Matches genuine refusal to translate/understand — NOT incidental occurrences
+# of "cannot" inside a valid translation (e.g. "I cannot go there" → English).
+_REFUSAL_RE = re.compile(
+    r"(cannot|can.?t|unable|not able)\s+(to\s+)?(translate|understand|read|process|identify)"
+    r"|don.?t\s+(understand|recognize|know)\s+(this|the)\s+(text|script|language|writing|characters?)"
+    r"|this\s+(text|script|language|writing)\s+is\s+(unknown|unfamiliar|unrecognized|not supported)",
+    re.IGNORECASE,
+)
+
+
 def _safe_model_name(model: str) -> str:
     """Convert a model identifier to a filesystem-safe string."""
     return re.sub(r'[^A-Za-z0-9._-]', '_', model)
@@ -435,10 +445,7 @@ def probe_locale(
     if trans_err:
         translation_refused = True
     else:
-        translation_refused = any(
-            w in trans_resp.lower()
-            for w in ["cannot", "can't", "unable", "don't understand", "not able"]
-        )
+        translation_refused = bool(_REFUSAL_RE.search(trans_resp))
 
     # ── Verdict ───────────────────────────────────────────────────────
     if fidelity >= 0.95 and script_recognized and not translation_refused:
@@ -547,6 +554,14 @@ def main() -> None:
         help="Seconds to wait between API calls to avoid rate-limiting "
              "(default: 1.0).",
     )
+    parser.add_argument(
+        "--controls", nargs="*",
+        metavar="LOCALE",
+        default=["en", "es", "fr", "de", "zh", "ja", "ar", "ru", "hi", "ko"],
+        help="Control locales (well-covered languages) prepended to the probe "
+             "list as a sanity check. Pass --controls with no arguments to "
+             "disable. Default: en es fr de zh ja ar ru hi ko",
+    )
     args = parser.parse_args()
 
     # ── API key resolution ─────────────────────────────────────────────
@@ -581,6 +596,22 @@ def main() -> None:
         print("[!] No locales to probe. Use --locales to specify them manually.")
         sys.exit(0)
 
+    # ── Control locales ────────────────────────────────────────────────
+    control_locales_set: set[str] = set()
+    if args.controls:
+        control_locales_set = set(args.controls)
+        existing_locs = {loc for loc, *_ in target_locales}
+        controls_to_add = [
+            (loc, 1.0, -1)
+            for loc in args.controls
+            if loc not in existing_locs
+        ]
+        target_locales = controls_to_add + target_locales
+        print(
+            f"[+] Prepending {len(controls_to_add)} control locale(s) "
+            f"({', '.join(args.controls)}) as sanity checks."
+        )
+
     # ── Run probes ─────────────────────────────────────────────────────
     print(
         f"\n[2/3] Probing model '{args.model}' ({args.api_type}) "
@@ -614,6 +645,7 @@ def main() -> None:
                 pause=args.pause,
             )
             result["median_known_score"] = round(med_score, 4)
+            result["is_control"] = locale in control_locales_set
             results[locale] = result
 
             fid = f"{result['echo_fidelity']:.0%}"
@@ -622,11 +654,16 @@ def main() -> None:
             tr  = "no" if result["translation_refused"] else "yes"
             v   = result["verdict"]
             art = " [byte-leak]" if result["byte_artifacts"] else ""
-            print(f" {fid:>9} {scr:>8} {tr:>7}  {v:<8}{art}")
+            ctrl = " [control]" if result["is_control"] else ""
+            print(f" {fid:>9} {scr:>8} {tr:>7}  {v:<8}{art}{ctrl}")
 
         except Exception as exc:
             print(f"  ERROR: {exc}")
-            results[locale] = {"locale": locale, "error": str(exc)}
+            results[locale] = {
+                "locale": locale,
+                "error": str(exc),
+                "is_control": locale in control_locales_set,
+            }
 
     # ── Save results ───────────────────────────────────────────────────
     print(f"\n[3/3] Saving results…")
