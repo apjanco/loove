@@ -1110,6 +1110,181 @@ def render(model_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Probe results — reads from data/probes/
+# ---------------------------------------------------------------------------
+
+PROBES_DIR = ROOT / "data" / "probes"
+
+VERDICT_COLORS = {"Strong": "#22c55e", "Partial": "#f59e0b", "Poor": "#ef4444"}
+
+
+def list_probe_files() -> list[str]:
+    """Return sorted probe file stems (model__date) from data/probes/."""
+    if not PROBES_DIR.exists():
+        return []
+    return sorted(
+        [p.stem for p in PROBES_DIR.glob("*.json")],
+        reverse=True,  # newest first
+    )
+
+
+def load_probe_data(stem: str) -> dict:
+    path = PROBES_DIR / f"{stem}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def make_probe_table(stem: str) -> pd.DataFrame:
+    if not stem:
+        return pd.DataFrame()
+    try:
+        data = load_probe_data(stem)
+    except Exception:
+        return pd.DataFrame()
+    rows = []
+    for locale, r in data.get("results", {}).items():
+        if "error" in r:
+            rows.append({
+                "Locale": locale,
+                "Language": r.get("lang_name", locale),
+                "Verdict": "Error",
+                "Fidelity": "",
+                "Script OK": "",
+                "Translation": "",
+                "Byte Leak": "",
+                "Known Score": "",
+                "Probe Text": "",
+            })
+        else:
+            rows.append({
+                "Locale": locale,
+                "Language": r.get("lang_name", locale),
+                "Verdict": r.get("verdict", ""),
+                "Fidelity": f"{r['echo_fidelity']:.0%}",
+                "Script OK": "yes" if r.get("script_recognized") else (
+                    "no" if r.get("script_recognized") is False else "?"),
+                "Translation": "refused" if r.get("translation_refused") else "ok",
+                "Byte Leak": "yes" if r.get("byte_artifacts") else "",
+                "Known Score": f"{r['median_known_score']:.3f}" if r.get("median_known_score") else "",
+                "Probe Text": r.get("probe_text", ""),
+            })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    order = {"Poor": 0, "Partial": 1, "Strong": 2, "Error": 3}
+    df["_sort"] = df["Verdict"].map(order).fillna(9)
+    df = df.sort_values("_sort").drop(columns=["_sort"])
+    return df
+
+
+def make_probe_summary_html(stem: str) -> str:
+    if not stem:
+        return ""
+    try:
+        data = load_probe_data(stem)
+    except Exception as exc:
+        return f"<p style='color:#ef4444'>Could not load probe file: {exc}</p>"
+
+    model   = data.get("probe_model", stem)
+    api     = data.get("api_type", "")
+    date_s  = data.get("probed_at", "")
+    thresh  = data.get("threshold", "")
+    results = data.get("results", {})
+
+    verdicts = [r.get("verdict") for r in results.values() if "error" not in r]
+    strong  = verdicts.count("Strong")
+    partial = verdicts.count("Partial")
+    poor    = verdicts.count("Poor")
+    errors  = sum(1 for r in results.values() if "error" in r)
+    total   = len(results)
+
+    def badge(label, count, color):
+        return (
+            f'<span style="background:{color};color:white;padding:3px 12px;'
+            f'border-radius:999px;font-weight:600;font-size:0.9em">'
+            f'{label} {count}</span>'
+        )
+
+    return f"""
+<div style="font-family:sans-serif;background:#f8fafc;border-radius:12px;
+            padding:16px 20px;margin-bottom:16px">
+  <div style="font-size:1.1em;font-weight:700;margin-bottom:4px">
+    🧪 Probe: <code>{model}</code>
+    <span style="font-size:0.8em;font-weight:400;color:#6b7280">
+      &nbsp;·&nbsp;{api}&nbsp;·&nbsp;{date_s}&nbsp;·&nbsp;threshold {thresh}
+    </span>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    {badge("Strong", strong, "#22c55e")}
+    {badge("Partial", partial, "#f59e0b")}
+    {badge("Poor", poor, "#ef4444")}
+    {f'<span style="color:#9ca3af;align-self:center">{errors} errors</span>' if errors else ''}
+    <span style="color:#9ca3af;align-self:center;margin-left:auto">
+      {total} language{'' if total == 1 else 's'} tested
+    </span>
+  </div>
+</div>
+"""
+
+
+def make_probe_chart(stem: str):
+    if not stem:
+        return go.Figure()
+    try:
+        data = load_probe_data(stem)
+    except Exception:
+        return go.Figure()
+
+    results = data.get("results", {})
+    rows = [
+        {
+            "locale": r.get("locale", k),
+            "lang":   r.get("lang_name", k),
+            "fidelity": r.get("echo_fidelity", 0.0),
+            "verdict": r.get("verdict", "Error"),
+            "known":  r.get("median_known_score", None),
+        }
+        for k, r in results.items()
+        if "error" not in r
+    ]
+    if not rows:
+        return go.Figure()
+
+    df = pd.DataFrame(rows).sort_values("fidelity")
+    colors = [VERDICT_COLORS.get(v, "#9ca3af") for v in df["verdict"]]
+
+    fig = go.Figure(go.Bar(
+        x=df["fidelity"],
+        y=df["lang"] + " (" + df["locale"] + ")",
+        orientation="h",
+        marker_color=colors,
+        customdata=df[["verdict", "known"]].values,
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "Echo fidelity: %{x:.0%}<br>"
+            "Verdict: %{customdata[0]}<br>"
+            "Median known score: %{customdata[1]:.3f}<extra></extra>"
+        ),
+    ))
+    fig.update_layout(
+        title=f"Echo Fidelity by Language — {data.get('probe_model', stem)}",
+        xaxis=dict(title="Echo fidelity", tickformat=".0%", range=[0, 1]),
+        yaxis=dict(title=""),
+        height=max(300, 28 * len(df)),
+        margin=dict(l=10, r=20, t=40, b=40),
+        plot_bgcolor="white",
+    )
+    return fig
+
+
+def render_probe(stem: str):
+    return (
+        make_probe_summary_html(stem),
+        make_probe_chart(stem),
+        make_probe_table(stem),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
@@ -1262,6 +1437,28 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 demo_btn = gr.Button("Analyze", variant="primary", scale=1, min_width=120)
             demo_html_out = gr.HTML()
 
+        # ── Probe Results ─────────────────────────────────────────────────
+        with gr.Tab("🧪 Probe Results"):
+            gr.Markdown(
+                "Results from `scripts/probe_model.py` — behavioural tests run against "
+                "black-box models using targeted multilingual probes. "
+                "Run the script locally to generate data, then re-open this tab.\n\n"
+                "**Verdict**: **Strong** = high echo fidelity + script recognized + translation ok; "
+                "**Partial** = some capability; **Poor** = likely byte-fallback or unreachable characters."
+            )
+            probe_file_dd = gr.Dropdown(
+                choices=list_probe_files(),
+                value=list_probe_files()[0] if list_probe_files() else None,
+                label="Probe run (model__date)",
+                interactive=True,
+            )
+            probe_summary_html = gr.HTML()
+            probe_chart_plot   = gr.Plot(label="Echo Fidelity by Language")
+            probe_results_table = gr.Dataframe(
+                label="Detailed Results",
+                interactive=False,
+                wrap=True,
+            )
 
     # ── Wire events ───────────────────────────────────────────────────────
 
@@ -1304,6 +1501,11 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         inputs=[model_dd, language_dd, demo_text_box],
         outputs=[demo_html_out],
     )
+    # Probe results tab
+    probe_outputs = [probe_summary_html, probe_chart_plot, probe_results_table]
+    probe_file_dd.change(fn=render_probe, inputs=[probe_file_dd], outputs=probe_outputs)
+    if list_probe_files():
+        demo.load(fn=render_probe, inputs=[probe_file_dd], outputs=probe_outputs)
     # Auto-load on page open
     if models:
         demo.load(fn=render, inputs=[model_dd], outputs=outputs)
