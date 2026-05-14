@@ -661,20 +661,130 @@ def make_language_highlighted_map(df: pd.DataFrame, locale: str) -> go.Figure:
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Language quick-view & all-models comparison
+# ---------------------------------------------------------------------------
+
+def make_language_quickview_html(row: pd.Series) -> str:
+    """Compact badge displayed immediately above the tabs when a language is selected."""
+    grade_color = GRADE_COLORS.get(str(row["grade"]), "#6b7280")
+    tpc = row.get("tokens_per_char")
+    fert_str = f"{tpc:.2f} tokens/char" if pd.notna(tpc) else "n/a"
+    return f"""
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+            padding:10px 18px;background:#f9fafb;border-radius:10px;
+            border-left:5px solid {grade_color};font-family:sans-serif;margin:6px 0">
+  <strong style="font-size:1.05em">{row['name']}</strong>
+  <span style="background:{grade_color};color:white;padding:3px 14px;
+               border-radius:999px;font-weight:600;font-size:0.9em">{row['grade']}</span>
+  <span style="font-size:1.15em;font-weight:700;color:{grade_color}">{row['score']:.4f}</span>
+  <span style="color:#6b7280;font-size:0.85em">
+    {row['family']} &middot; {row['macroarea']} &middot; Fertility: {fert_str}
+  </span>
+  <span style="color:#94a3b8;font-size:0.8em;margin-left:auto;font-style:italic">
+    See &ldquo;Language Detail&rdquo; tab for full breakdown &darr;
+  </span>
+</div>
+"""
+
+
+# Lazy-loaded cache: locale \u2192 {model_name: (score, grade)}
+_MODEL_SCORES: dict = {}
+_scores_loaded = False
+
+
+def _ensure_scores_loaded() -> None:
+    global _scores_loaded
+    if _scores_loaded:
+        return
+    for model_name in list_models():
+        try:
+            data = load_coverage(model_name)
+            for locale, lang in data.get("languages", {}).items():
+                if not lang.get("has_cldr"):
+                    continue
+                main = lang.get("main") or {}
+                if not main:
+                    continue
+                score = round(main.get("weighted_score", 0.0), 4)
+                grade = coverage_grade(score)
+                if locale not in _MODEL_SCORES:
+                    _MODEL_SCORES[locale] = {}
+                _MODEL_SCORES[locale][model_name] = (score, grade)
+        except Exception:
+            continue
+    _scores_loaded = True
+
+
+def make_model_comparison_chart(locale: str, lang_name: str) -> go.Figure:
+    """Horizontal bar chart: every available model's coverage score for one locale."""
+    _ensure_scores_loaded()
+    model_data = _MODEL_SCORES.get(locale, {})
+    if not model_data:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"No coverage data found for locale \u2018{locale}\u2019.",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=14, color="#6b7280"),
+        )
+        fig.update_layout(title="Model Comparison")
+        return fig
+
+    rows = [
+        {"model": m, "score": score, "grade": grade}
+        for m, (score, grade) in model_data.items()
+    ]
+    sdf = pd.DataFrame(rows).sort_values("score", ascending=True)
+
+    fig = px.bar(
+        sdf,
+        x="score",
+        y="model",
+        orientation="h",
+        color="grade",
+        color_discrete_map=GRADE_COLORS,
+        category_orders={"grade": GRADE_ORDER},
+        text=sdf["score"].apply(lambda s: f"{s:.3f}"),
+        labels={"score": "Coverage Score", "model": "Model", "grade": "Grade"},
+        title=f"Coverage Score Across All Models \u2014 {lang_name} ({locale})",
+    )
+    fig.add_vline(x=0.95, line_dash="dot", line_color=GRADE_COLORS["Excellent"],
+                  annotation_text="Excellent \u22650.95", annotation_position="top right")
+    fig.add_vline(x=0.80, line_dash="dot", line_color=GRADE_COLORS["Good"],
+                  annotation_text="Good \u22650.80", annotation_position="top right")
+    fig.add_vline(x=0.50, line_dash="dot", line_color=GRADE_COLORS["Partial"],
+                  annotation_text="Partial \u22650.50", annotation_position="top right")
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=max(420, len(sdf) * 22 + 120),
+        plot_bgcolor="white",
+        xaxis=dict(range=[0, 1.18], gridcolor="#f0f0f0"),
+        showlegend=True,
+        legend=dict(title="Grade"),
+    )
+    return fig
+
+
 def render_language(model_name: str, locale: str):
     """Render the language detail panel for one locale."""
     if not model_name or not locale:
-        return "", go.Figure(), go.Figure()
+        return "", "", go.Figure(), go.Figure(), go.Figure()
     data   = load_coverage(model_name)
     df     = build_dataframe(data)
     row_df = df[df["locale"] == locale]
     if row_df.empty:
-        return f"<p>Language '<b>{locale}</b>' not found in coverage data.</p>", go.Figure(), go.Figure()
+        return (
+            "",
+            f"<p>Language '<b>{locale}</b>' not found in coverage data.</p>",
+            go.Figure(), go.Figure(), go.Figure(),
+        )
     row = row_df.iloc[0]
     return (
+        make_language_quickview_html(row),
         make_language_card_html(row, data),
         make_language_tier_pie(row),
         make_language_highlighted_map(df, locale),
+        make_model_comparison_chart(locale, row["name"]),
     )
 
 
@@ -740,6 +850,8 @@ def render(model_name: str):
 # ---------------------------------------------------------------------------
 
 models = list_models()
+_PREFERRED_DEFAULTS = ["gpt-4o", "gpt-4", "meta-llama/Llama-3.1-8B", "mistralai/Mistral-7B-v0.3"]
+_default_model = next((m for m in _PREFERRED_DEFAULTS if m in models), models[0] if models else None)
 
 _OUTPUTS_COUNT = 12  # must match number of return values in render()
 
@@ -755,7 +867,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
     with gr.Row():
         model_dd = gr.Dropdown(
             choices=models,
-            value=models[0] if models else None,
+            value=_default_model,
             label="Model",
             scale=3,
         )
@@ -769,6 +881,9 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
             interactive=True,
             scale=4,
         )
+
+    # ---- Language quick-view (updates on language select) ----
+    lang_quickview = gr.HTML()
 
     # ---- Summary ----
     summary_html = gr.HTML()
@@ -827,13 +942,21 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         # ── Language Detail ───────────────────────────────────────────────
         with gr.Tab("🔍 Language Detail"):
             gr.Markdown(
-                "Select a language from the **Language** dropdown above to see a full breakdown: "
-                "tier distribution, problematic codepoints, fertility scores, and map location."
+                "Select a language from the **Language** dropdown above. "
+                "A quick-view badge appears immediately; full detail is shown here.\n\n"
+                "The **Model Comparison** chart below shows how *every* available model "
+                "covers the selected language — making it easy to see where coverage gaps "
+                "are universal vs. model-specific."
             )
             lang_card_html = gr.HTML()
             with gr.Row():
                 lang_tier_pie = gr.Plot(label="Tier Distribution")
                 lang_map      = gr.Plot(label="Location on World Map")
+            gr.Markdown("### 📊 Coverage Across All Models")
+            gr.Markdown(
+                "First selection may take a moment to load comparison data for all models."
+            )
+            lang_comparison_plot = gr.Plot(label="Model Comparison")
     # ── Wire events ───────────────────────────────────────────────────────
 
     outputs = [
@@ -851,7 +974,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         language_dd,
     ]
 
-    lang_outputs = [lang_card_html, lang_tier_pie, lang_map]
+    lang_outputs = [lang_quickview, lang_card_html, lang_tier_pie, lang_map, lang_comparison_plot]
 
     run_btn.click(fn=render, inputs=[model_dd], outputs=outputs)
     model_dd.change(fn=render, inputs=[model_dd], outputs=outputs)
