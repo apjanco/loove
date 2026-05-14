@@ -383,9 +383,16 @@ def _call_portkey(
     model: str,
     messages: list[dict],
 ) -> str:
-    """Call any provider via the Portkey AI gateway SDK."""
+    """Call any provider via the Portkey AI gateway SDK.
+
+    Portkey uses x-portkey-api-key / x-portkey-virtual-key headers, NOT
+    Authorization: Bearer, which is why the plain openai api-type returns 403.
+    """
     from portkey_ai import Portkey
-    client = Portkey(api_key=api_key, virtual_key=virtual_key)
+    kwargs: dict = {"api_key": api_key}
+    if virtual_key:
+        kwargs["virtual_key"] = virtual_key
+    client = Portkey(**kwargs)
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -654,10 +661,9 @@ def main() -> None:
     virtual_key = args.virtual_key or os.environ.get("PORTKEY_VIRTUAL_KEY", "")
     if args.api_type == "portkey" and not virtual_key:
         print(
-            "[!] --api-type portkey requires --virtual-key or PORTKEY_VIRTUAL_KEY env var.",
-            file=sys.stderr,
+            "[*] No --virtual-key provided; using Portkey api_key only "
+            "(requires a default Config set in the Portkey dashboard)."
         )
-        sys.exit(1)
 
     # ── Extra headers ──────────────────────────────────────────────────
     extra_headers: dict[str, str] | None = None
