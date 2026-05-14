@@ -9,7 +9,7 @@ app_file: app.py
 pinned: false
 ---
 
-<img height="200" src="loove-image.jpg" />
+
 
 # Loove — LLM Language Coverage Dashboard
 
