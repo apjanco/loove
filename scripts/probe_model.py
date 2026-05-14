@@ -377,6 +377,24 @@ def _call_openai(
     return body["choices"][0]["message"]["content"].strip()
 
 
+def _call_portkey(
+    api_key: str,
+    virtual_key: str,
+    model: str,
+    messages: list[dict],
+) -> str:
+    """Call any provider via the Portkey AI gateway SDK."""
+    from portkey_ai import Portkey
+    client = Portkey(api_key=api_key, virtual_key=virtual_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=400,
+        temperature=0,
+    )
+    return resp.choices[0].message.content.strip()
+
+
 def _call_gemini(
     api_key: str,
     model: str,
@@ -417,6 +435,7 @@ def probe_locale(
     timeout: int,
     pause: float,
     extra_headers: dict[str, str] | None = None,
+    virtual_key: str = "",
 ) -> dict:
     """Run the 3-test battery for one locale. Returns a result dict."""
 
@@ -428,6 +447,9 @@ def probe_locale(
         try:
             if api_type == "gemini":
                 return _call_gemini(api_key, model, prompt, timeout), None
+            elif api_type == "portkey":
+                msgs = [{"role": "user", "content": prompt}]
+                return _call_portkey(api_key, virtual_key, model, msgs), None
             else:
                 msgs = [{"role": "user", "content": prompt}]
                 return _call_openai(
@@ -549,13 +571,19 @@ def main() -> None:
         help="Name of the model to probe (e.g. gemini-2.0-flash, gpt-4o).",
     )
     parser.add_argument(
-        "--api-type", required=True, choices=["openai", "gemini"],
+        "--api-type", required=True, choices=["openai", "gemini", "portkey"],
         help="API backend: 'openai' for OpenAI-compatible endpoints, "
-             "'gemini' for Google Gemini.",
+             "'gemini' for Google Gemini, 'portkey' for the Portkey AI gateway.",
     )
     parser.add_argument(
         "--api-key", default=None,
-        help="API key. Defaults to OPENAI_API_KEY or GEMINI_API_KEY env var.",
+        help="API key. For portkey: your Portkey API key. "
+             "Defaults to PORTKEY_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY env var.",
+    )
+    parser.add_argument(
+        "--virtual-key", default=None,
+        help="Portkey virtual key that encodes the upstream provider + credentials. "
+             "Defaults to PORTKEY_VIRTUAL_KEY env var. Required for --api-type portkey.",
     )
     parser.add_argument(
         "--base-url", default="https://api.openai.com/v1",
@@ -608,13 +636,25 @@ def main() -> None:
     # ── API key resolution ─────────────────────────────────────────────
     api_key = args.api_key
     if not api_key:
-        env_var = "GEMINI_API_KEY" if args.api_type == "gemini" else "OPENAI_API_KEY"
+        if args.api_type == "gemini":
+            env_var = "GEMINI_API_KEY"
+        elif args.api_type == "portkey":
+            env_var = "PORTKEY_API_KEY"
+        else:
+            env_var = "OPENAI_API_KEY"
         api_key = os.environ.get(env_var, "")
     if not api_key:
         print(
-            f"[!] No API key provided. Set --api-key or the "
-            f"{'GEMINI_API_KEY' if args.api_type == 'gemini' else 'OPENAI_API_KEY'} "
-            f"environment variable.",
+            f"[!] No API key provided. Set --api-key or the {env_var} environment variable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ── Virtual key (Portkey only) ─────────────────────────────────────
+    virtual_key = args.virtual_key or os.environ.get("PORTKEY_VIRTUAL_KEY", "")
+    if args.api_type == "portkey" and not virtual_key:
+        print(
+            "[!] --api-type portkey requires --virtual-key or PORTKEY_VIRTUAL_KEY env var.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -696,6 +736,7 @@ def main() -> None:
                 timeout=args.timeout,
                 pause=args.pause,
                 extra_headers=extra_headers,
+                virtual_key=virtual_key,
             )
             result["median_known_score"] = round(med_score, 4)
             result["is_control"] = locale in control_locales_set
