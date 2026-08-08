@@ -16,3 +16,6 @@ tqdm>=4.66.0              # Progress bars for bulk processing
 gradio>=4.0.0             # Web UI framework
 plotly>=5.0.0             # Interactive charts
 pandas>=2.0.0             # Data manipulation
+
+# LLM probe script (scripts/probe_model.py)
+portkey-ai>=2.0.0         # Portkey AI gateway SDK (--api-type portkey)
