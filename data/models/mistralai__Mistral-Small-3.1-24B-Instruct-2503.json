@@ -2,7 +2,7 @@
   "model_id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
   "source": "huggingface",
   "vocab_size": 131072,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -7760,5 +7760,5 @@
     65341,
     65374
   ],
-  "computed_at": "2026-05-12T18:26:25.074101+00:00"
+  "computed_at": "2026-08-08T02:08:16.306008+00:00"
 }

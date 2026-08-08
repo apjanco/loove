@@ -2,9 +2,8 @@
   "model_id": "google/gemma-2-27b",
   "source": "huggingface",
   "vocab_size": 256000,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
-    0,
     1,
     2,
     3,
@@ -27,7 +26,6 @@
     20,
     21,
     22,
-    23,
     24,
     25,
     26,
@@ -20729,7 +20727,6 @@
     1114111
   ],
   "codepoints_any": [
-    0,
     1,
     2,
     3,
@@ -20752,7 +20749,6 @@
     20,
     21,
     22,
-    23,
     24,
     25,
     26,
@@ -41453,5 +41449,5 @@
     1113089,
     1114111
   ],
-  "computed_at": "2026-05-12T18:27:21.046922+00:00"
+  "computed_at": "2026-08-08T02:06:01.831846+00:00"
 }

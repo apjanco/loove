@@ -2,7 +2,7 @@
   "model_id": "deepseek-ai/deepseek-v3",
   "source": "huggingface",
   "vocab_size": 128815,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -8623,7 +8623,6 @@
     9508,
     9516,
     9552,
-    9601,
     9608,
     9612,
     9617,
@@ -14656,5 +14655,5 @@
     128514,
     128578
   ],
-  "computed_at": "2026-05-12T18:29:17.760687+00:00"
+  "computed_at": "2026-08-08T02:05:22.609244+00:00"
 }

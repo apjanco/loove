@@ -2,7 +2,7 @@
   "model_id": "meta-llama/Llama-3.1-8B",
   "source": "huggingface",
   "vocab_size": 128256,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -8304,5 +8304,5 @@
     128521,
     128578
   ],
-  "computed_at": "2026-05-12T18:25:50.399196+00:00"
+  "computed_at": "2026-08-08T02:07:07.867501+00:00"
 }

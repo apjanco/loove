@@ -9,6 +9,7 @@ Pre-compute coverage files with:
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
@@ -1142,7 +1143,9 @@ def make_probe_table(stem: str) -> pd.DataFrame:
         return pd.DataFrame()
     rows = []
     for locale, r in data.get("results", {}).items():
-        if "error" in r:
+        # "Error" verdicts are rows whose API call never completed — they carry
+        # no evidence about the model, so no fidelity or refusal is shown.
+        if "error" in r or r.get("verdict") == "Error":
             rows.append({
                 "Locale": locale,
                 "Language": r.get("lang_name", locale),
@@ -1152,8 +1155,10 @@ def make_probe_table(stem: str) -> pd.DataFrame:
                 "Script OK": "",
                 "Translation": "",
                 "Byte Leak": "",
-                "Known Score": "",
-                "Probe Text": "",
+                "Known Score": (f"{r['median_known_score']:.3f}"
+                                if r.get("median_known_score") else ""),
+                "Probe Text": (r.get("error") or r.get("echo_error")
+                               or "call failed"),
             })
         else:
             rows.append({
@@ -1161,10 +1166,12 @@ def make_probe_table(stem: str) -> pd.DataFrame:
                 "Language": r.get("lang_name", locale),
                 "Control": "✓" if r.get("is_control") else "",
                 "Verdict": r.get("verdict", ""),
-                "Fidelity": f"{r['echo_fidelity']:.0%}",
+                "Fidelity": ("" if r.get("echo_fidelity") is None
+                             else f"{r['echo_fidelity']:.0%}"),
                 "Script OK": "yes" if r.get("script_recognized") else (
                     "no" if r.get("script_recognized") is False else "?"),
-                "Translation": "refused" if r.get("translation_refused") else "ok",
+                "Translation": ("?" if r.get("translation_refused") is None
+                                else "refused" if r.get("translation_refused") else "ok"),
                 "Byte Leak": "yes" if r.get("byte_artifacts") else "",
                 "Known Score": f"{r['median_known_score']:.3f}" if r.get("median_known_score") else "",
                 "Probe Text": r.get("probe_text", ""),
@@ -1172,10 +1179,20 @@ def make_probe_table(stem: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    order = {"Poor": 0, "Partial": 1, "Strong": 2, "Error": 3}
+    # Inconclusive rows sort last: they are not the worst result, they are no result.
+    order = {"Poor": 0, "Partial": 1, "Strong": 2, "Error": 4}
     df["_sort"] = df["Verdict"].map(order).fillna(9)
     df = df.sort_values("_sort").drop(columns=["_sort"])
     return df
+
+
+def _first_error(results: dict) -> str:
+    """Representative transport error, for the 'no usable results' banner."""
+    for row in results.values():
+        msg = row.get("error") or row.get("echo_error")
+        if msg:
+            return html.escape(str(msg)[:80])
+    return "cause unrecorded"
 
 
 def make_probe_summary_html(stem: str) -> str:
@@ -1196,14 +1213,43 @@ def make_probe_summary_html(stem: str) -> str:
     strong  = verdicts.count("Strong")
     partial = verdicts.count("Partial")
     poor    = verdicts.count("Poor")
-    errors  = sum(1 for r in results.values() if "error" in r)
+    # Rows whose API call never completed. Counted separately from the graded
+    # verdicts because a failed call is not a negative result about the model.
+    errors  = sum(1 for r in results.values()
+                  if "error" in r or r.get("verdict") == "Error")
     total   = len(results)
+    graded  = total - errors
 
     def badge(label, count, color):
         return (
             f'<span style="background:{color};color:white;padding:3px 12px;'
             f'border-radius:999px;font-weight:600;font-size:0.9em">'
             f'{label} {count}</span>'
+        )
+
+    # A run where every call failed must not read as a result. Surface it above
+    # the badges rather than letting the reader infer it from a zero count.
+    banner = ""
+    if graded == 0 and total:
+        banner = (
+            '<div style="background:#fef2f2;border-left:4px solid #ef4444;'
+            'border-radius:6px;padding:10px 14px;margin-bottom:10px;'
+            'color:#7f1d1d;font-size:0.92em">'
+            '<strong>No usable results.</strong> All '
+            f'{total} calls in this run failed at the transport layer '
+            f'({_first_error(results)}), so this file says nothing about '
+            "the model's language support. Re-run with a working API key."
+            "</div>"
+        )
+    elif errors:
+        banner = (
+            '<div style="background:#fffbeb;border-left:4px solid #f59e0b;'
+            'border-radius:6px;padding:10px 14px;margin-bottom:10px;'
+            'color:#78350f;font-size:0.92em">'
+            f'{errors} of {total} calls failed and are excluded from the '
+            f'verdicts below, which cover {graded} language'
+            f"{'' if graded == 1 else 's'}."
+            "</div>"
         )
 
     return f"""
@@ -1215,13 +1261,14 @@ def make_probe_summary_html(stem: str) -> str:
       &nbsp;·&nbsp;{api}&nbsp;·&nbsp;{date_s}&nbsp;·&nbsp;threshold {thresh}
     </span>
   </div>
+  {banner}
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
     {badge("Strong", strong, "#22c55e")}
     {badge("Partial", partial, "#f59e0b")}
     {badge("Poor", poor, "#ef4444")}
-    {f'<span style="color:#9ca3af;align-self:center">{errors} errors</span>' if errors else ''}
+    {f'<span style="color:#9ca3af;align-self:center">{errors} inconclusive</span>' if errors else ''}
     <span style="color:#9ca3af;align-self:center;margin-left:auto">
-      {total} language{'' if total == 1 else 's'} tested
+      {graded} of {total} language{'' if total == 1 else 's'} graded
     </span>
   </div>
 </div>

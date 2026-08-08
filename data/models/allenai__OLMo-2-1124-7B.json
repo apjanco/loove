@@ -2,7 +2,7 @@
   "model_id": "allenai/OLMo-2-1124-7B",
   "source": "huggingface",
   "vocab_size": 100278,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -2818,5 +2818,5 @@
     128521,
     128578
   ],
-  "computed_at": "2026-05-12T18:31:03.239173+00:00"
+  "computed_at": "2026-08-08T02:04:28.399821+00:00"
 }

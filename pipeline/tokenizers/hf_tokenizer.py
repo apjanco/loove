@@ -64,6 +64,106 @@ def _decode_gpt2_token(token_str: str) -> bytes | None:
 
 
 # ---------------------------------------------------------------------------
+# Tokenizer flavour and byte-fallback detection
+# ---------------------------------------------------------------------------
+
+# SentencePiece raw-byte tokens, e.g. "<0x41>".
+_SP_BYTE_RE = re.compile(r"^<0x[0-9A-Fa-f]{2}>$")
+
+# Characters used to probe for byte fallback. Each is filtered against the
+# model's own code-point set before use, so a probe only counts when the
+# character genuinely has no token of its own.
+_PROBE_CANDIDATES: tuple[str, ...] = (
+    "\u12a0",      # ETHIOPIC SYLLABLE A
+    "\u2d30",      # TIFINAGH LETTER YA
+    "\u13a0",      # CHEROKEE LETTER A
+    "\ua500",      # VAI SYLLABLE EE
+    "\U00010480",  # OSMANYA LETTER ALEF
+    "\U00016a4f",  # MRO LETTER TA
+)
+
+
+def _detect_byte_level_bpe(tokenizer) -> bool:
+    """
+    Structural test for GPT-2-style byte-level BPE, used to pick the decoder.
+
+    `hasattr(tokenizer, "byte_encoder")` only holds for slow (Python)
+    tokenizers, so fast tokenizers — the default in transformers 4.x — need
+    the backend's component types inspected instead.
+    """
+    if hasattr(tokenizer, "byte_encoder"):
+        return True
+
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return False
+
+    for attr in ("decoder", "pre_tokenizer"):
+        component = getattr(backend, attr, None)
+        if component is None:
+            continue
+        if "ByteLevel" in type(component).__name__:
+            return True
+        # Sequence components hold their children in the repr.
+        try:
+            if "ByteLevel" in str(component):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _probe_byte_fallback(tokenizer, covered: set[int]) -> bool:
+    """
+    Determine whether the tokenizer has byte fallback by *behaviour*.
+
+    A tokenizer has byte fallback if a character with no token of its own
+    still survives an encode/decode round-trip without being replaced by the
+    unknown token. This is what the flag is supposed to mean, and unlike
+    attribute or vocabulary-shape heuristics it works identically for fast
+    and slow tokenizers and for every internal token format.
+
+    Args:
+        covered: code points the vocabulary can represent. Probe characters
+                 found here are skipped — a successful round-trip would prove
+                 nothing about fallback.
+
+    Returns False when no usable probe character exists, which is the safe
+    direction: it matches the previous behaviour of assuming no fallback.
+    """
+    unk = tokenizer.unk_token
+    tested = 0
+
+    for char in _PROBE_CANDIDATES:
+        if ord(char) in covered:
+            continue
+        try:
+            ids = tokenizer.encode(char, add_special_tokens=False)
+        except Exception:
+            continue
+        if not ids:
+            continue
+
+        tested += 1
+
+        # An explicit unknown token means the character was discarded.
+        try:
+            if unk is not None and unk in tokenizer.convert_ids_to_tokens(ids):
+                return False
+        except Exception:
+            pass
+
+        # The round-trip must reproduce the character exactly.
+        try:
+            if char not in tokenizer.decode(ids):
+                return False
+        except Exception:
+            return False
+
+    return tested > 0
+
+
+# ---------------------------------------------------------------------------
 # Main extraction function
 # ---------------------------------------------------------------------------
 
@@ -109,16 +209,15 @@ def extract(
     # ------------------------------------------------------------------
     # Detect tokenizer flavour
     # ------------------------------------------------------------------
-    is_bpe_byte_level = hasattr(tokenizer, "byte_encoder")
+    # Structural, and used only to choose the decoder. Whether the model has
+    # byte fallback is decided behaviourally further down, after the
+    # code-point sets are known.
+    is_bpe_byte_level = _detect_byte_level_bpe(tokenizer)
 
-    # SentencePiece byte-fallback: look for <0xXX> tokens in the vocab
-    _sp_byte_re = re.compile(r"^<0x[0-9A-Fa-f]{2}>$")
-    has_sp_byte_tokens = any(
-        _sp_byte_re.match(k) for k in list(vocab)[:500]
-    )
-
-    has_byte_fallback = is_bpe_byte_level or has_sp_byte_tokens
-
+    # SentencePiece raw-byte tokens are excluded from the code-point sets
+    # unconditionally: they are the fallback mechanism, not evidence that a
+    # character is represented. The scan covers the whole vocabulary, so the
+    # result does not depend on dict iteration order.
     special_tokens: set[str] = set(tokenizer.all_special_tokens or [])
 
     codepoints_single: set[int] = set()
@@ -130,7 +229,10 @@ def extract(
 
         # Skip SentencePiece raw-byte tokens — they are the fallback mechanism,
         # not evidence that the model represents the character meaningfully.
-        if has_sp_byte_tokens and _sp_byte_re.match(token_str):
+        # Unconditional: previously this was gated on a flag whose value
+        # depended on where the byte tokens happened to fall in dict order,
+        # which made ingest non-deterministic across runs.
+        if _SP_BYTE_RE.match(token_str):
             continue
 
         decoded: str | None = None
@@ -166,6 +268,11 @@ def extract(
         # Single code-point token → this character has Tier-0 support.
         if len(cps) == 1:
             codepoints_single.add(cps[0])
+
+    # Byte fallback is decided by behaviour, not by tokenizer internals. Run
+    # it last so probe characters can be filtered against what the vocabulary
+    # actually covers.
+    has_byte_fallback = _probe_byte_fallback(tokenizer, codepoints_any)
 
     return ModelVocabData(
         model_id=model_id,

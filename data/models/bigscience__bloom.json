@@ -2,7 +2,7 @@
   "model_id": "bigscience/bloom",
   "source": "huggingface",
   "vocab_size": 250680,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -14530,5 +14530,5 @@
     128344,
     138462
   ],
-  "computed_at": "2026-05-12T18:30:03.579375+00:00"
+  "computed_at": "2026-08-08T02:04:38.368518+00:00"
 }

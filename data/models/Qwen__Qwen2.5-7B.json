@@ -2,7 +2,7 @@
   "model_id": "Qwen/Qwen2.5-7B",
   "source": "huggingface",
   "vocab_size": 151665,
-  "has_byte_fallback": false,
+  "has_byte_fallback": true,
   "codepoints_single": [
     0,
     1,
@@ -35639,5 +35639,5 @@
     183955,
     917761
   ],
-  "computed_at": "2026-05-12T18:28:10.523945+00:00"
+  "computed_at": "2026-08-08T02:04:12.190363+00:00"
 }

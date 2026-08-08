@@ -432,6 +432,39 @@ def _call_gemini(
 # Single-locale probe
 # ---------------------------------------------------------------------------
 
+def grade_verdict(
+    fidelity: float | None,
+    script_recognized: bool | None,
+    translation_refused: bool | None,
+    echo_failed: bool,
+) -> str:
+    """
+    Grade one locale from the three test outcomes.
+
+    Returns "Strong", "Partial", "Poor", or "Error".
+
+    "Error" means the evidence never arrived, which is categorically different
+    from "Poor". Earlier versions set ``fidelity = 0.0`` and
+    ``translation_refused = True`` on any exception and then graded the row
+    normally, so a timeout or an expired key produced "Poor" — indistinguishable
+    from a model that mangled the script. Every row in ``data/probes/`` was
+    written that way: all 108 failed with HTTP 403 and were stored as "Poor",
+    which the dashboard displayed as 36 failing languages per frontier model.
+
+    The echo test is load-bearing: without a round-trip there is no fidelity
+    measurement to grade, so its failure is inconclusive. Failures in the script
+    or translation tests only remove one signal, and are handled by the
+    ``None``-tolerant comparisons below.
+    """
+    if echo_failed or fidelity is None:
+        return "Error"
+    if fidelity >= 0.95 and script_recognized and translation_refused is False:
+        return "Strong"
+    if fidelity >= 0.75 or script_recognized:
+        return "Partial"
+    return "Poor"
+
+
 def probe_locale(
     locale: str,
     lang_name: str,
@@ -471,9 +504,13 @@ def probe_locale(
         f"preserving every character without translation or modification:"
         f"\n\n{probe_text}"
     )
+    # A transport failure is not evidence about the model.  Leaving fidelity at
+    # 0.0 on a timeout or rate-limit would score an unreachable API exactly like
+    # a model that mangled the script, so failed calls yield None and the
+    # verdict below reports "Error" rather than "Poor".
     if echo_err:
-        fidelity = 0.0
-        byte_artifacts = False
+        fidelity = None
+        byte_artifacts = None
     else:
         fidelity = _char_fidelity(probe_text, echo_resp)
         byte_artifacts = _has_byte_artifacts(echo_resp)
@@ -507,17 +544,19 @@ def probe_locale(
             f"If you cannot understand the text, say so explicitly:\n\n{probe_text}"
         )
         if trans_err:
-            translation_refused = True
+            # Unknown, not refused: we never heard back from the model.
+            translation_refused = None
         else:
             translation_refused = bool(_REFUSAL_RE.search(trans_resp))
 
     # ── Verdict ───────────────────────────────────────────────────────
-    if fidelity >= 0.95 and script_recognized and not translation_refused:
-        verdict = "Strong"
-    elif fidelity >= 0.75 or script_recognized:
-        verdict = "Partial"
-    else:
-        verdict = "Poor"
+    errors = [e for e in (echo_err, script_err, trans_err) if e]
+    verdict = grade_verdict(
+        fidelity=fidelity,
+        script_recognized=script_recognized,
+        translation_refused=translation_refused,
+        echo_failed=bool(echo_err),
+    )
 
     return {
         "locale":              locale,
@@ -525,7 +564,7 @@ def probe_locale(
         "probe_text":          probe_text,
         "echo_response":       echo_resp,
         "echo_error":          echo_err,
-        "echo_fidelity":       round(fidelity, 4),
+        "echo_fidelity":       round(fidelity, 4) if fidelity is not None else None,
         "byte_artifacts":      byte_artifacts,
         "expected_script":     expected_script,
         "script_response":     script_resp,
@@ -535,6 +574,10 @@ def probe_locale(
         "translation_error":   trans_err,
         "translation_refused": translation_refused,
         "verdict":             verdict,
+        # True when at least one of the three calls never completed, so a
+        # consumer can exclude these rows instead of reading them as findings.
+        "transport_failed":    bool(errors),
+        "n_transport_errors":  len(errors),
     }
 
 
@@ -748,10 +791,12 @@ def main() -> None:
             result["is_control"] = locale in control_locales_set
             results[locale] = result
 
-            fid = f"{result['echo_fidelity']:.0%}"
+            fid = ("n/a" if result["echo_fidelity"] is None
+                   else f"{result['echo_fidelity']:.0%}")
             scr = ("yes" if result["script_recognized"] else
                    "no" if result["script_recognized"] is False else "?")
-            tr  = "no" if result["translation_refused"] else "yes"
+            tr  = ("?" if result["translation_refused"] is None
+                   else "no" if result["translation_refused"] else "yes")
             v   = result["verdict"]
             art = " [byte-leak]" if result["byte_artifacts"] else ""
             ctrl = " [control]" if result["is_control"] else ""
@@ -792,11 +837,28 @@ def main() -> None:
     strong  = verdicts.count("Strong")
     partial = verdicts.count("Partial")
     poor    = verdicts.count("Poor")
-    errors  = sum(1 for r in results.values() if "error" in r)
+    # Locales where a call never completed. These are inconclusive, not
+    # negative results — reporting them as "Poor" would attribute an API
+    # outage to the model's handling of the language.
+    inconclusive = verdicts.count("Error") + sum(1 for r in results.values() if "error" in r)
+    degraded = sum(
+        1 for r in results.values()
+        if r.get("transport_failed") and r.get("verdict") != "Error"
+    )
     print(
         f"\n  Summary: {strong} Strong / {partial} Partial / {poor} Poor"
-        + (f" / {errors} Errors" if errors else "")
+        + (f" / {inconclusive} inconclusive (call failed)" if inconclusive else "")
     )
+    if degraded:
+        print(
+            f"  Note: {degraded} graded locale(s) had a partial transport failure; "
+            "their verdict rests on fewer than three tests."
+        )
+    if inconclusive:
+        print(
+            "  Inconclusive locales carry no evidence about language support — "
+            "exclude them from scoring rather than counting them as failures."
+        )
 
 
 if __name__ == "__main__":

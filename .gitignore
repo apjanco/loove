@@ -1,1 +1,9 @@
 .venv/
+__pycache__/
+*.pyc
+
+# Analysis scratch — regenerate from scripts/, not tracked
+*.pre-migration
+*.bak
+full_regen_result.json
+_view_*.png
