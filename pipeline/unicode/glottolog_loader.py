@@ -121,12 +121,26 @@ def _download_csv(force_refresh: bool = False) -> str:
 # ISO 639-3 → CLDR locale bridge
 # ---------------------------------------------------------------------------
 
-def _iso3_to_cldr(iso3: str) -> str | None:
+def _iso3_to_cldr_candidate(iso3: str) -> str | None:
     """
-    Map an ISO 639-3 code to the most likely CLDR / BCP 47 locale ID.
+    Map an ISO 639-3 code to a *candidate* CLDR / BCP 47 locale ID.
 
-    Returns a bare language subtag (e.g. "hi", "ar", "nld") suitable for
-    looking up in the CLDR language database.  Returns None on failure.
+    Returns a bare language subtag (e.g. "hi", "ar", "nld").  Returns None on
+    failure.
+
+    IMPORTANT — this is a syntactic transform, not an existence check.
+    ``langcodes.standardize_tag`` will happily return a well-formed tag for any
+    structurally valid ISO 639-3 code, whether or not CLDR holds any data for
+    that language: ``standardize_tag("abq")`` yields ``"abq"`` even though CLDR
+    has no Abaza locale.  The returned value therefore means "this is what the
+    locale would be called if it existed", and callers MUST verify membership
+    against the actual CLDR database before treating it as real.
+
+    This was previously named ``_iso3_to_cldr`` and its result was assigned
+    directly to ``has_cldr``, which marked 7,497 of 8,238 languoids as having
+    CLDR data when only 277 actually did.  Those 7,220 false positives were then
+    silently dropped from coverage output — not even emitted as stubs — because
+    the stub branch skips anything already flagged ``has_cldr``.
     """
     if not iso3 or not _HAS_LANGCODES:
         return None
@@ -136,6 +150,26 @@ def _iso3_to_cldr(iso3: str) -> str | None:
         return tag.split("-")[0] if tag else None
     except Exception:
         return None
+
+
+def _load_cldr_locale_ids() -> frozenset[str]:
+    """
+    The set of locale IDs the vendored CLDR database actually contains.
+
+    Used to turn ``_iso3_to_cldr_candidate``'s syntactic guess into a verified
+    fact.  Returns an empty set if the CLDR data is missing, which makes every
+    ``has_cldr`` False — the safe direction, since a language wrongly treated as
+    a stub is visible in the output whereas one wrongly treated as CLDR-backed
+    disappears from it.
+    """
+    cldr_path = Path(__file__).resolve().parents[2] / "data" / "cldr" / "languages.json"
+    if not cldr_path.exists():
+        return frozenset()
+    try:
+        with cldr_path.open(encoding="utf-8") as fh:
+            return frozenset(json.load(fh).keys())
+    except (OSError, ValueError):
+        return frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +208,10 @@ def _parse_csv(raw_csv: str) -> tuple[dict[str, dict], dict[str, dict]]:
     languoids: dict[str, dict] = {}
     families:  dict[str, dict] = {}
 
+    # Loaded once: the locale IDs CLDR genuinely provides, used to verify each
+    # candidate mapping rather than trusting tag standardization alone.
+    cldr_ids = _load_cldr_locale_ids()
+
     for row in all_rows:
         glottocode = (row.get(col_id) or "").strip()
         level      = (row.get(col_level) or "").strip().lower()
@@ -208,7 +246,13 @@ def _parse_csv(raw_csv: str) -> tuple[dict[str, dict], dict[str, dict]]:
         except ValueError:
             lon = None
 
-        cldr_locale = _iso3_to_cldr(iso3) if iso3 else None
+        # Two distinct facts, previously conflated.  The candidate is what CLDR
+        # *would* call this language; has_cldr is whether CLDR actually has it.
+        candidate  = _iso3_to_cldr_candidate(iso3) if iso3 else None
+        has_cldr   = candidate is not None and candidate in cldr_ids
+        # Only expose a locale ID when it resolves to real data, so downstream
+        # code cannot accidentally look up a locale that does not exist.
+        cldr_locale = candidate if has_cldr else None
 
         languoids[glottocode] = {
             "glottocode":  glottocode,
@@ -220,7 +264,7 @@ def _parse_csv(raw_csv: str) -> tuple[dict[str, dict], dict[str, dict]]:
             "family_name": None,         # filled in below
             "latitude":    lat,
             "longitude":   lon,
-            "has_cldr":    cldr_locale is not None,
+            "has_cldr":    has_cldr,
         }
 
     # Back-fill family names

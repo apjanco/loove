@@ -39,6 +39,7 @@ from pathlib import Path
 
 import requests
 from babel import Locale, UnknownLocaleError
+from babel.core import get_global
 try:
     from babel.core import locale_identifiers
 except ImportError:
@@ -175,12 +176,37 @@ def _extract_exemplars(xml_text: str) -> dict[str, set[int]]:
     return result
 
 
+def _resolve_script(locale_id: str, loc: Locale) -> str:
+    """
+    Return the ISO 15924 script code for a locale, e.g. "Deva", "Latn".
+
+    ``Locale.script`` is only populated when the identifier carries an explicit
+    script subtag ("sr_Latn"), so for bare tags like "hi" or "az" — which is
+    almost every locale in the CLDR database — it is the empty string. Falling
+    back to it alone left `script` empty for all 310 locales, which silently
+    disabled script-aware UDHR variant selection downstream.
+
+    We consult CLDR's likely-subtags table, the standard mechanism for
+    completing a partial identifier: "az" → "az_Latn_AZ" gives "Latn".
+    """
+    if loc.script:
+        return str(loc.script)
+    likely = get_global("likely_subtags") or {}
+    for key in (locale_id, locale_id.replace("-", "_"), loc.language):
+        value = likely.get(key)
+        if not value:
+            continue
+        parts = str(value).replace("-", "_").split("_")
+        if len(parts) >= 2 and len(parts[1]) == 4:
+            return parts[1]
+    return ""
+
+
 def _locale_display_name(locale_id: str) -> tuple[str, str]:
     """Return (english_name, script_code) for a locale via babel."""
     try:
         loc = Locale.parse(locale_id)
-        # babel stores script as a script code like "Latn", "Deva", "Arab"
-        script = str(loc.script) if loc.script else ""
+        script = _resolve_script(locale_id, loc)
         # get_display_name('en') returns the name in English
         name = str(loc.get_display_name("en") or locale_id)
         return name, script
