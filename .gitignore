@@ -7,3 +7,7 @@ __pycache__/
 *.bak
 full_regen_result.json
 _view_*.png
+
+# session analysis outputs (kept as artifacts, not in repo)
+loove_*.csv
+loove_*.png
