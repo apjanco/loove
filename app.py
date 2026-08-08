@@ -9,6 +9,7 @@ Pre-compute coverage files with:
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
@@ -552,6 +553,115 @@ def make_full_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Described-only languages (script known, no exemplar characters)
+#
+# These are the languages the tiered score CANNOT be computed for: CLDR has no
+# exemplar character set, so there is nothing to assign to a tier. GlotScript
+# still tells us which writing system they use, which supports a weaker but
+# real claim — whether the model represents that script at all.
+#
+# Nothing in this view may be presented as a coverage score. `script_supported`
+# is deliberately three-valued: True / False / None, where None means "no scored
+# language uses this script, so we have no evidence either way". Rendering None
+# as "No" would repeat the exact class of bug this dataset was built to fix.
+# ---------------------------------------------------------------------------
+
+_REACH_LABEL = {True: "Yes", False: "No", None: "Unknown"}
+
+
+def build_described_dataframe(data: dict) -> pd.DataFrame:
+    """Flatten the unscored-but-script-described languages into a DataFrame."""
+    rows = []
+    for code, lang in data.get("languages", {}).items():
+        if (lang.get("main") or {}).get("total"):
+            continue                      # scored — belongs in the main table
+        scripts = lang.get("scripts") or []
+        if not scripts:
+            continue                      # no script information at all
+        rows.append({
+            "name":       lang.get("name") or code,
+            "glottocode": lang.get("glottocode") or code,
+            "scripts":    ", ".join(scripts),
+            "script_aux": ", ".join(lang.get("script_aux") or []),
+            "family":     lang.get("family_name") or "Unknown",
+            "reachable":  _REACH_LABEL[lang.get("script_supported")],
+        })
+    return pd.DataFrame(rows)
+
+
+def make_described_summary_html(data: dict, df: pd.DataFrame,
+                                desc: pd.DataFrame) -> str:
+    """Banner stating exactly what is and is not known about these languages."""
+    total  = len(data.get("languages", {}))
+    scored = len(df)
+    described = len(desc)
+    dark = total - scored - described
+    yes = int((desc["reachable"] == "Yes").sum()) if described else 0
+    unk = int((desc["reachable"] == "Unknown").sum()) if described else 0
+    n_scripts = desc["scripts"].str.split(", ").explode().nunique() if described else 0
+
+    def card(value, label, color="#111827"):
+        return (
+            f'<div style="flex:1;min-width:130px;background:#f9fafb;border-radius:8px;'
+            f'padding:12px 14px">'
+            f'<div style="font-size:1.5em;font-weight:700;color:{color}">{value:,}</div>'
+            f'<div style="color:#6b7280;font-size:0.8em">{label}</div></div>'
+        )
+
+    return f"""
+<div style="margin-bottom:14px">
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+    {card(scored, "scored (character-level)", "#1a6fb5")}
+    {card(described, "described (script only)", "#4a9bd4")}
+    {card(dark, "no information")}
+    {card(n_scripts, "distinct writing systems")}
+  </div>
+  <div style="background:#fffbeb;border-left:3px solid #f59e0b;border-radius:4px;
+              padding:10px 14px;font-size:0.88em;line-height:1.5">
+    <b>These languages have no coverage score, and none is implied here.</b>
+    CLDR provides no exemplar character set for them, so there are no characters
+    to assign to tiers. What GlotScript adds is the writing system, which supports
+    only a script-level claim: <b>{yes:,}</b> of these languages are written in a
+    script this model demonstrably represents. <b>{unk:,}</b> are marked
+    <i>Unknown</i> &mdash; no scored language uses their script, so this corpus has
+    no evidence either way. <i>Unknown</i> does not mean unsupported.
+  </div>
+</div>
+"""
+
+
+def make_described_table(desc: pd.DataFrame) -> pd.DataFrame:
+    if desc.empty:
+        return pd.DataFrame()
+    out = desc.sort_values(["reachable", "family", "name"])[
+        ["name", "scripts", "script_aux", "family", "reachable", "glottocode"]
+    ].copy()
+    out.columns = ["Language", "Script(s)", "Auxiliary Scripts", "Family",
+                   "Script Represented", "Glottocode"]
+    return out.reset_index(drop=True)
+
+
+def make_described_family_chart(desc: pd.DataFrame) -> go.Figure:
+    """Which language families the script-described set is concentrated in."""
+    if desc.empty:
+        return go.Figure()
+    top = desc["family"].value_counts().head(15).sort_values()
+    fig = go.Figure(go.Bar(
+        x=top.values, y=top.index, orientation="h",
+        marker_color="#4a9bd4",
+        hovertemplate="%{y}: %{x:,} languages<extra></extra>",
+    ))
+    fig.update_layout(
+        title="Script-described languages by family (top 15)",
+        xaxis_title="Languages", yaxis_title=None,
+        margin=dict(l=10, r=10, t=50, b=10), height=460,
+        plot_bgcolor="white",
+    )
+    fig.update_xaxes(gridcolor="#eee")
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Language detail helpers
 # ---------------------------------------------------------------------------
 
@@ -1059,6 +1169,7 @@ def render(model_name: str):
         return ("", empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
                 empty_df, empty_df,
+                "", empty_fig, empty_df,
                 gr.update(choices=[], value=None))
 
     data = load_coverage(model_name)
@@ -1068,9 +1179,14 @@ def render(model_name: str):
         msg = f"<p>No CLDR language data found in coverage file for <b>{model_name}</b>.</p>"
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
+        # Script-level description may still exist even with nothing scored.
+        desc = build_described_dataframe(data)
         return (msg, empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
                 empty_df, empty_df,
+                make_described_summary_html(data, df, desc),
+                make_described_family_chart(desc),
+                make_described_table(desc),
                 gr.update(choices=[], value=None))
 
     summary_html      = make_summary_html(data, df)
@@ -1085,6 +1201,11 @@ def render(model_name: str):
     fert_bar          = make_fertility_bar(df)
     incomplete_tbl    = make_incomplete_table(df)
     full_tbl          = make_full_table(df)
+
+    desc              = build_described_dataframe(data)
+    described_html    = make_described_summary_html(data, df, desc)
+    described_fam     = make_described_family_chart(desc)
+    described_tbl     = make_described_table(desc)
 
     lang_choices = [
         (f"{r['name']} ({r['locale']})", r['locale'])
@@ -1105,6 +1226,9 @@ def render(model_name: str):
         fert_bar,
         incomplete_tbl,
         full_tbl,
+        described_html,
+        described_fam,
+        described_tbl,
         gr.update(choices=lang_choices, value=first_locale),
     )
 
@@ -1142,7 +1266,9 @@ def make_probe_table(stem: str) -> pd.DataFrame:
         return pd.DataFrame()
     rows = []
     for locale, r in data.get("results", {}).items():
-        if "error" in r:
+        # "Error" verdicts are rows whose API call never completed — they carry
+        # no evidence about the model, so no fidelity or refusal is shown.
+        if "error" in r or r.get("verdict") == "Error":
             rows.append({
                 "Locale": locale,
                 "Language": r.get("lang_name", locale),
@@ -1152,8 +1278,10 @@ def make_probe_table(stem: str) -> pd.DataFrame:
                 "Script OK": "",
                 "Translation": "",
                 "Byte Leak": "",
-                "Known Score": "",
-                "Probe Text": "",
+                "Known Score": (f"{r['median_known_score']:.3f}"
+                                if r.get("median_known_score") else ""),
+                "Probe Text": (r.get("error") or r.get("echo_error")
+                               or "call failed"),
             })
         else:
             rows.append({
@@ -1161,10 +1289,12 @@ def make_probe_table(stem: str) -> pd.DataFrame:
                 "Language": r.get("lang_name", locale),
                 "Control": "✓" if r.get("is_control") else "",
                 "Verdict": r.get("verdict", ""),
-                "Fidelity": f"{r['echo_fidelity']:.0%}",
+                "Fidelity": ("" if r.get("echo_fidelity") is None
+                             else f"{r['echo_fidelity']:.0%}"),
                 "Script OK": "yes" if r.get("script_recognized") else (
                     "no" if r.get("script_recognized") is False else "?"),
-                "Translation": "refused" if r.get("translation_refused") else "ok",
+                "Translation": ("?" if r.get("translation_refused") is None
+                                else "refused" if r.get("translation_refused") else "ok"),
                 "Byte Leak": "yes" if r.get("byte_artifacts") else "",
                 "Known Score": f"{r['median_known_score']:.3f}" if r.get("median_known_score") else "",
                 "Probe Text": r.get("probe_text", ""),
@@ -1172,10 +1302,20 @@ def make_probe_table(stem: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    order = {"Poor": 0, "Partial": 1, "Strong": 2, "Error": 3}
+    # Inconclusive rows sort last: they are not the worst result, they are no result.
+    order = {"Poor": 0, "Partial": 1, "Strong": 2, "Error": 4}
     df["_sort"] = df["Verdict"].map(order).fillna(9)
     df = df.sort_values("_sort").drop(columns=["_sort"])
     return df
+
+
+def _first_error(results: dict) -> str:
+    """Representative transport error, for the 'no usable results' banner."""
+    for row in results.values():
+        msg = row.get("error") or row.get("echo_error")
+        if msg:
+            return html.escape(str(msg)[:80])
+    return "cause unrecorded"
 
 
 def make_probe_summary_html(stem: str) -> str:
@@ -1196,14 +1336,43 @@ def make_probe_summary_html(stem: str) -> str:
     strong  = verdicts.count("Strong")
     partial = verdicts.count("Partial")
     poor    = verdicts.count("Poor")
-    errors  = sum(1 for r in results.values() if "error" in r)
+    # Rows whose API call never completed. Counted separately from the graded
+    # verdicts because a failed call is not a negative result about the model.
+    errors  = sum(1 for r in results.values()
+                  if "error" in r or r.get("verdict") == "Error")
     total   = len(results)
+    graded  = total - errors
 
     def badge(label, count, color):
         return (
             f'<span style="background:{color};color:white;padding:3px 12px;'
             f'border-radius:999px;font-weight:600;font-size:0.9em">'
             f'{label} {count}</span>'
+        )
+
+    # A run where every call failed must not read as a result. Surface it above
+    # the badges rather than letting the reader infer it from a zero count.
+    banner = ""
+    if graded == 0 and total:
+        banner = (
+            '<div style="background:#fef2f2;border-left:4px solid #ef4444;'
+            'border-radius:6px;padding:10px 14px;margin-bottom:10px;'
+            'color:#7f1d1d;font-size:0.92em">'
+            '<strong>No usable results.</strong> All '
+            f'{total} calls in this run failed at the transport layer '
+            f'({_first_error(results)}), so this file says nothing about '
+            "the model's language support. Re-run with a working API key."
+            "</div>"
+        )
+    elif errors:
+        banner = (
+            '<div style="background:#fffbeb;border-left:4px solid #f59e0b;'
+            'border-radius:6px;padding:10px 14px;margin-bottom:10px;'
+            'color:#78350f;font-size:0.92em">'
+            f'{errors} of {total} calls failed and are excluded from the '
+            f'verdicts below, which cover {graded} language'
+            f"{'' if graded == 1 else 's'}."
+            "</div>"
         )
 
     return f"""
@@ -1215,13 +1384,14 @@ def make_probe_summary_html(stem: str) -> str:
       &nbsp;·&nbsp;{api}&nbsp;·&nbsp;{date_s}&nbsp;·&nbsp;threshold {thresh}
     </span>
   </div>
+  {banner}
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
     {badge("Strong", strong, "#22c55e")}
     {badge("Partial", partial, "#f59e0b")}
     {badge("Poor", poor, "#ef4444")}
-    {f'<span style="color:#9ca3af;align-self:center">{errors} errors</span>' if errors else ''}
+    {f'<span style="color:#9ca3af;align-self:center">{errors} inconclusive</span>' if errors else ''}
     <span style="color:#9ca3af;align-self:center;margin-left:auto">
-      {total} language{'' if total == 1 else 's'} tested
+      {graded} of {total} language{'' if total == 1 else 's'} graded
     </span>
   </div>
 </div>
@@ -1391,6 +1561,21 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 "T0–T3 = character counts at each tier."
             )
             full_table = gr.Dataframe(interactive=False, wrap=False)
+        # ── Described-only languages ──────────────────────────────────────
+        with gr.Tab("🈳 Beyond CLDR"):
+            gr.Markdown(
+                "Languages that **cannot be scored** — CLDR provides no exemplar "
+                "characters for them, so there is nothing to assign to a coverage "
+                "tier. GlotScript supplies their writing system, which supports a "
+                "weaker claim: whether the model represents that script at all.\n\n"
+                "*Script Represented* is three-valued. **Unknown** means no scored "
+                "language uses that script, so this corpus has no evidence either "
+                "way — it does **not** mean the language is unsupported."
+            )
+            described_summary = gr.HTML()
+            described_family  = gr.Plot(label="By Family")
+            described_table   = gr.Dataframe(interactive=False, wrap=False)
+
         # ── Language Detail ───────────────────────────────────────────────
         with gr.Tab("🔍 Language Detail"):
             gr.Markdown(
@@ -1477,6 +1662,9 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         fert_bar_plot,
         incomplete_table,
         full_table,
+        described_summary,
+        described_family,
+        described_table,
         language_dd,
     ]
 
