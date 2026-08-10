@@ -46,7 +46,9 @@ Output: data/glottolog/languoids.json
     "family_name":  "Indo-European",
     "latitude":     25.0,
     "longitude":    77.0,
-    "has_cldr":     true
+    "has_cldr":     true,
+    "language_type": "Living",     // ISO 639-3 type; null if unknown
+    "is_historical": false         // Ancient/Historical/Extinct; null if unknown
   },
   ...
 }
@@ -173,16 +175,89 @@ def _load_cldr_locale_ids() -> frozenset[str]:
 
 
 # ---------------------------------------------------------------------------
+# ISO 639-3 language-type bridge (Living / Ancient / Historical / …)
+# ---------------------------------------------------------------------------
+# Glottolog's languoid CSV has no temporal dimension, so a dead language and a
+# thriving one look identical.  The ISO 639-3 code table carries a
+# ``Language_Type`` column, and every languoid already stores its ``iso639_3``
+# code, so joining the two lets us flag pre-modern languages without any new
+# corpus.  Codes: L=Living, E=Extinct, A=Ancient, H=Historical, C=Constructed,
+# S=Special.
+_ISO639_3_TAB_URL = (
+    "https://iso639-3.sil.org/sites/iso639-3/files/downloads/iso-639-3.tab"
+)
+_ISO639_3_CACHE = _CACHE_DIR / "iso-639-3.tab"
+
+_ISO639_3_TYPE_LABELS: dict[str, str] = {
+    "L": "Living",
+    "E": "Extinct",
+    "A": "Ancient",
+    "H": "Historical",
+    "C": "Constructed",
+    "S": "Special",
+}
+
+# Non-living, non-constructed languages: what the "historical languages" gap
+# refers to.  Extinct is included because ISO reserves it for languages that
+# died out in recent centuries, which are still historical rather than modern.
+_HISTORICAL_TYPES = frozenset({"Ancient", "Historical", "Extinct"})
+
+
+def _download_iso639_3(force_refresh: bool = False) -> str | None:
+    """Download and cache the ISO 639-3 code table; None if unreachable."""
+    if _ISO639_3_CACHE.exists() and not force_refresh:
+        return _ISO639_3_CACHE.read_text(encoding="utf-8")
+    try:
+        print(f"[glottolog] Downloading ISO 639-3 table from {_ISO639_3_TAB_URL} …")
+        resp = requests.get(_ISO639_3_TAB_URL, timeout=120)
+        resp.raise_for_status()
+    except Exception as exc:
+        # A missing type table degrades gracefully to language_type=None rather
+        # than aborting the whole registry build.
+        print(
+            f"[glottolog] WARNING: could not fetch ISO 639-3 table ({exc}); "
+            "language_type will be null for all entries."
+        )
+        return None
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _ISO639_3_CACHE.write_text(resp.text, encoding="utf-8")
+    print(f"[glottolog] Cached to {_ISO639_3_CACHE}")
+    return resp.text
+
+
+def _load_iso639_3_types(force_refresh: bool = False) -> dict[str, str]:
+    """Return an ISO 639-3 code → human-readable language-type mapping."""
+    raw = _download_iso639_3(force_refresh=force_refresh)
+    if not raw:
+        return {}
+    types: dict[str, str] = {}
+    reader = csv.DictReader(io.StringIO(raw), delimiter="\t")
+    for row in reader:
+        code = (row.get("Id") or "").strip()
+        code_type = (row.get("Language_Type") or "").strip()
+        if code and code_type:
+            types[code] = _ISO639_3_TYPE_LABELS.get(code_type, code_type)
+    return types
+
+
+# ---------------------------------------------------------------------------
 # CSV parser
 # ---------------------------------------------------------------------------
 
-def _parse_csv(raw_csv: str) -> tuple[dict[str, dict], dict[str, dict]]:
+def _parse_csv(
+    raw_csv: str,
+    iso_types: dict[str, str] | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
     """
     Parse the languoid CSV into (languoids, families) dicts.
 
     languoids: glottocode → entry dict (level == "language" only)
     families:  glottocode → {glottocode, name}  (level == "family" only)
+
+    ``iso_types`` maps ISO 639-3 codes to a language-type label and, when
+    provided, populates each entry's ``language_type`` / ``is_historical``.
     """
+    iso_types = iso_types or {}
     reader = csv.DictReader(io.StringIO(raw_csv))
 
     all_rows: list[dict] = list(reader)
@@ -254,17 +329,26 @@ def _parse_csv(raw_csv: str) -> tuple[dict[str, dict], dict[str, dict]]:
         # code cannot accidentally look up a locale that does not exist.
         cldr_locale = candidate if has_cldr else None
 
+        # Temporal classification via ISO 639-3.  None means "unknown" (no ISO
+        # code or no type table), which is distinct from a known Living value.
+        language_type = iso_types.get(iso3) if iso3 else None
+        is_historical = (
+            language_type in _HISTORICAL_TYPES if language_type else None
+        )
+
         languoids[glottocode] = {
-            "glottocode":  glottocode,
-            "name":        (row.get(col_name) or "").strip(),
-            "iso639_3":    iso3 or None,
-            "cldr_locale": cldr_locale,
-            "macroarea":   macroarea or None,
-            "family_id":   family_id or None,
-            "family_name": None,         # filled in below
-            "latitude":    lat,
-            "longitude":   lon,
-            "has_cldr":    has_cldr,
+            "glottocode":    glottocode,
+            "name":          (row.get(col_name) or "").strip(),
+            "iso639_3":      iso3 or None,
+            "cldr_locale":   cldr_locale,
+            "macroarea":     macroarea or None,
+            "family_id":     family_id or None,
+            "family_name":   None,         # filled in below
+            "latitude":      lat,
+            "longitude":     lon,
+            "has_cldr":      has_cldr,
+            "language_type": language_type,
+            "is_historical": is_historical,
         }
 
     # Back-fill family names
@@ -295,7 +379,8 @@ def build_languoid_database(force_refresh: bool = False) -> dict[str, dict]:
         return data["languoids"]
 
     raw_csv = _download_csv(force_refresh=force_refresh)
-    languoids, families = _parse_csv(raw_csv)
+    iso_types = _load_iso639_3_types(force_refresh=force_refresh)
+    languoids, families = _parse_csv(raw_csv, iso_types)
 
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _LANGUOIDS_OUT.write_text(
@@ -309,10 +394,12 @@ def build_languoid_database(force_refresh: bool = False) -> dict[str, dict]:
 
     with_cldr    = sum(1 for e in languoids.values() if e["has_cldr"])
     without_cldr = len(languoids) - with_cldr
+    historical   = sum(1 for e in languoids.values() if e["is_historical"])
     print(
         f"[glottolog] {len(languoids):,} languages parsed.\n"
         f"            {with_cldr:,} have a CLDR locale match.\n"
-        f"            {without_cldr:,} have no CLDR character data."
+        f"            {without_cldr:,} have no CLDR character data.\n"
+        f"            {historical:,} are historical (Ancient/Historical/Extinct)."
     )
 
     return languoids

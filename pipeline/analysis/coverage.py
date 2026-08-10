@@ -86,6 +86,7 @@ from pipeline.analysis.script_types import (
     normalize_exemplars,
     script_type,
 )
+from pipeline.unicode.historic_scripts import scripts_all_unencoded
 
 # Glottolog is optional — if the database hasn't been fetched yet we still
 # produce a valid (unenriched) coverage result.
@@ -169,7 +170,7 @@ def compute_coverage(
         entry: dict = {
             "name":     lang_data.get("name", locale_id),
             "script":   script,
-            "has_cldr": True,
+            "has_cldr": lang_data.get("has_cldr", True),
             "main":     main_result.to_dict(),
             # How the exemplar denominator relates to the script's real
             # inventory, and therefore how the score above may be read.
@@ -178,6 +179,17 @@ def compute_coverage(
             "denominator_kind":  denominator_kind(script),
             "comparability":     comparability(script),
         }
+
+        # Synthetic exemplars (e.g. Unicode-block sets for extinct scripts)
+        # carry their own provenance and metadata; surface them without
+        # pretending the numbers came from CLDR.
+        if lang_data.get("exemplar_source"):
+            entry["exemplar_source"] = lang_data["exemplar_source"]
+        for _k in ("glottocode", "iso639_3", "macroarea", "family_id",
+                   "family_name", "latitude", "longitude", "is_historical",
+                   "language_type"):
+            if lang_data.get(_k) is not None and _k not in entry:
+                entry[_k] = lang_data[_k]
 
         # Combinatorial scripts get a second score against their generator set.
         # Korean is the case that matters: 11,172 precomposed syllables vs 67
@@ -214,6 +226,8 @@ def compute_coverage(
                 "family_name": gl["family_name"],
                 "latitude":    gl["latitude"],
                 "longitude":   gl["longitude"],
+                "is_historical": gl.get("is_historical"),
+                "language_type": gl.get("language_type"),
             })
 
         languages[locale_id] = entry
@@ -247,6 +261,14 @@ def compute_coverage(
             def _orthographic_main(_iso):  # noqa: E306 — degrade to no script info
                 return []
 
+        # Wikidata fills script gaps GlotScript leaves open (cached; empty if
+        # never fetched).  Used only as a fallback when GlotScript is silent.
+        try:
+            from pipeline.unicode.wikidata_scripts import load_wikidata_scripts
+            wikidata_scripts = load_wikidata_scripts()
+        except Exception:
+            wikidata_scripts = {}
+
         # Which scripts does this tokenizer represent at all?  Derived from the
         # scored languages, whose exemplar characters we do have.
         scripts_present: set[str] = set()
@@ -277,6 +299,11 @@ def compute_coverage(
                 continue
             if gl.get("has_cldr"):
                 continue  # Should have been covered above; skip duplicates.
+            # A historical language may already be present as a scored entry
+            # keyed by glottocode (synthetic Unicode-block exemplar); never let
+            # the stub overwrite that real analysis.
+            if glottocode in languages:
+                continue
 
             # Writing system from GlotScript, where the language has an ISO
             # 639-3 code to join on.  Glottolog assigns no ISO code to ~740
@@ -286,6 +313,13 @@ def compute_coverage(
             # GlotScript's main column is unordered, so element zero is Braille
             # for English and Hindi.  See glotscript_loader for the detail.
             scripts = _orthographic_main(gl["iso639_3"]) if gl.get("iso639_3") else []
+            # Fall back to Wikidata for languages GlotScript has no script for.
+            script_source = "glotscript" if scripts else None
+            if not scripts and gl.get("iso639_3"):
+                wd = wikidata_scripts.get(gl["iso639_3"], [])
+                if wd:
+                    scripts = wd
+                    script_source = "wikidata"
 
             # Reachability is three-valued.  None means "cannot tell": either no
             # script is known, or none of this language's scripts appears among
@@ -297,6 +331,16 @@ def compute_coverage(
                 # Written in *any* represented script is enough — a digraphic
                 # language is reachable if either orthography is covered.
                 script_supported = any(s in scripts_present for s in testable)
+
+            # A script Unicode does not encode is unreachable by construction:
+            # no tokenizer can hold code points that do not exist.  This is a
+            # stronger, source-independent verdict than the tokenizer-derived
+            # one above, so it overrides it.
+            if scripts and scripts_all_unencoded(scripts):
+                script_supported = False
+                script_encoded = False
+            else:
+                script_encoded = None
 
             # Use glottocode as the key for stub entries
             languages[glottocode] = {
@@ -310,15 +354,23 @@ def compute_coverage(
                 "latitude":    gl["latitude"],
                 "longitude":   gl["longitude"],
                 "has_cldr":    False,
+                # Temporal classification (ISO 639-3), so a historical language
+                # with no script data is distinguishable from a living one we
+                # simply have not scored.
+                "is_historical": gl.get("is_historical"),
+                "language_type": gl.get("language_type"),
                 # --- GlotScript-derived, script level only ---
                 # A list, because 603 languages are attested in more than one
                 # script and there is no field marking which is primary.
                 "scripts":           scripts,
                 "script_aux":        (gs["aux"] if gs else []) or [],
-                "script_source":     "glotscript" if gs else None,
+                "script_source":     script_source,
                 "unwritten":         bool(gs["unwritten"]) if gs else None,
                 # True/False/None — see above; NOT a coverage score.
                 "script_supported":  script_supported,
+                # False when the script has no Unicode encoding at all; None
+                # when encoding is not the limiting factor.
+                "script_encoded":    script_encoded,
                 # Explicit: this language has no character-level analysis.
                 "scored":            False,
             }

@@ -80,6 +80,28 @@ def _print_stats(languoids: dict) -> None:
     print(f"\n  Total languages: {total:,}")
     print(f"  With CLDR data:  {with_cldr:,} ({with_cldr/total:.1%})")
     print(f"  Without CLDR:    {total-with_cldr:,} ({(total-with_cldr)/total:.1%})")
+
+    # Language-type breakdown (ISO 639-3)
+    by_type: dict[str, int] = defaultdict(int)
+    for entry in languoids.values():
+        by_type[entry.get("language_type") or "(unknown)"] += 1
+    if set(by_type) != {"(unknown)"}:
+        print("\n── Language-type breakdown (ISO 639-3) ────────────────")
+        for name, count in sorted(by_type.items(), key=lambda x: -x[1]):
+            print(f"  {name:<22}  {count:>6,}")
+        historical = sum(
+            1 for e in languoids.values() if e.get("is_historical")
+        )
+        hist_scored = sum(
+            1 for e in languoids.values()
+            if e.get("is_historical") and e.get("has_cldr")
+        )
+        print(
+            f"\n  Historical languages: {historical:,} "
+            f"({hist_scored:,} scorable via CLDR, "
+            f"{historical - hist_scored:,} registry-only)."
+        )
+
     print(
         "\nNote: languages without CLDR data will appear in the dashboard\n"
         "registry but cannot be scored for character-level coverage."
