@@ -30,15 +30,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.locales:
-        locales = args.locales
-    else:
-        try:
-            db = load_language_database()
-            locales = list(db.keys())
-        except FileNotFoundError:
+    try:
+        db = load_language_database()
+    except FileNotFoundError:
+        if not args.locales:
             print("CLDR language database not found.  Run: python scripts/fetch_cldr.py first.")
             sys.exit(1)
+        db = {}
+
+    locales = args.locales if args.locales else list(db.keys())
+    # Script hints keep multi-script locales (az, bs, tk, uz, ...) on the same
+    # translation compute_fertility will measure.
+    scripts = {
+        loc: db[loc]["script"]
+        for loc in locales
+        if loc in db and db[loc].get("script")
+    }
 
     available = set(get_available_locales())
     to_fetch = [loc for loc in locales if loc in available]
@@ -48,7 +55,7 @@ def main() -> None:
         print(f"No UDHR translation found for: {', '.join(skipped)}")
 
     print(f"Downloading UDHR texts for {len(to_fetch)} locales…")
-    prefetch_all(to_fetch)
+    prefetch_all(to_fetch, scripts=scripts)
     print("Done.")
 
 

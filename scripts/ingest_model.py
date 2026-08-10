@@ -147,6 +147,19 @@ def main() -> None:
     language_db = build_language_database(locales=args.locales)
     print(f"      {len(language_db)} languages loaded")
 
+    # Extinct-script historical languages have no CLDR exemplar but a definitive
+    # Unicode-block inventory; synthesise those so they can be scored too.
+    if not args.locales:
+        from pipeline.unicode.historic_scripts import build_historic_language_db
+        historic_db = build_historic_language_db()
+        added = 0
+        for key, entry in historic_db.items():
+            if key not in language_db:
+                language_db[key] = entry
+                added += 1
+        if added:
+            print(f"      + {added} historic-script languages (synthetic Unicode-block exemplars)")
+
     # ------------------------------------------------------------------
     # 4. Compute coverage (with optional fertility)
     # ------------------------------------------------------------------
@@ -170,8 +183,8 @@ def main() -> None:
 
     # Summary statistics
     lang_results = result["languages"]
-    scored    = {lid: v for lid, v in lang_results.items() if v.get("has_cldr", True) and "main" in v}
-    stubs     = {lid: v for lid, v in lang_results.items() if not v.get("has_cldr", True)}
+    scored    = {lid: v for lid, v in lang_results.items() if "main" in v}
+    stubs     = {lid: v for lid, v in lang_results.items() if "main" not in v}
     scores    = [v["main"]["weighted_score"] for v in scored.values()]
 
     if scores:

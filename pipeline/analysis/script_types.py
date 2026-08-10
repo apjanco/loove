@@ -136,6 +136,8 @@ SCRIPT_TYPES: dict[str, tuple[str, str]] = {
     "Nshu": ("logographic", "open_set"),
     "Egyp": ("logographic", "open_set"),
     "Xsux": ("logographic", "open_set"),
+    "Tang": ("logographic", "open_set"),
+    "Hluw": ("logographic", "open_set"),
 }
 
 #: Denominator kinds whose raw scores may be compared across scripts.

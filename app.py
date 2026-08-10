@@ -115,6 +115,72 @@ def build_dataframe(data: dict) -> pd.DataFrame:
     return df.sort_values("score").reset_index(drop=True)
 
 
+_HISTORICAL_COLUMNS = [
+    "Language", "Script", "ISO", "Family", "Source", "Coverage", "Status", "T2", "T3",
+]
+
+
+def build_historical_dataframe(data: dict) -> pd.DataFrame:
+    """Table of historical languages this pipeline scores or flags as unreachable.
+
+    Covers dead-script languages given synthetic Unicode-block exemplars plus the
+    handful of CLDR classical languages, and languages whose script Unicode does
+    not encode at all. Living-script historical languages are excluded - they are
+    already reachable and appear in the ordinary CLDR views.
+    """
+    rows = []
+    for locale, lang in data["languages"].items():
+        if not lang.get("is_historical"):
+            continue
+        main = lang.get("main") or {}
+        scored = bool(main)
+        unencoded = lang.get("script_encoded") is False
+        if not scored and not unencoded:
+            continue  # living-script / script-unknown historical: not this view
+
+        if lang.get("exemplar_source") == "unicode_block":
+            source = "Unicode block"
+        elif lang.get("has_cldr"):
+            source = "CLDR"
+        else:
+            source = "\u2014"
+
+        if scored:
+            score = main.get("weighted_score", 0.0)
+            t2, t3 = main.get("tier2_count", 0), main.get("tier3_count", 0)
+            coverage = f"{score:.0%}"
+            if t3 and not t2:
+                status = "unreachable (no byte-fallback)"
+            elif t2:
+                status = "byte-fallback only"
+            else:
+                status = "native tokens"
+            sort_key = score
+        else:
+            t2 = t3 = 0
+            coverage = "\u2014"
+            status = "no Unicode script"
+            sort_key = -1.0
+
+        rows.append({
+            "Language": lang.get("name", locale),
+            "Script":   lang.get("script") or ", ".join(lang.get("scripts") or []) or "\u2014",
+            "ISO":      lang.get("iso639_3") or "",
+            "Family":   lang.get("family_name") or "\u2014",
+            "Source":   source,
+            "Coverage": coverage,
+            "Status":   status,
+            "T2":       t2,
+            "T3":       t3,
+            "_sort":    sort_key,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=_HISTORICAL_COLUMNS)
+    df = pd.DataFrame(rows)
+    return df.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Summary panel
 # ---------------------------------------------------------------------------
@@ -550,115 +616,6 @@ def make_full_table(df: pd.DataFrame) -> pd.DataFrame:
         "ISO 639-3", "Glottocode",
     ]
     return out.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# Described-only languages (script known, no exemplar characters)
-#
-# These are the languages the tiered score CANNOT be computed for: CLDR has no
-# exemplar character set, so there is nothing to assign to a tier. GlotScript
-# still tells us which writing system they use, which supports a weaker but
-# real claim — whether the model represents that script at all.
-#
-# Nothing in this view may be presented as a coverage score. `script_supported`
-# is deliberately three-valued: True / False / None, where None means "no scored
-# language uses this script, so we have no evidence either way". Rendering None
-# as "No" would repeat the exact class of bug this dataset was built to fix.
-# ---------------------------------------------------------------------------
-
-_REACH_LABEL = {True: "Yes", False: "No", None: "Unknown"}
-
-
-def build_described_dataframe(data: dict) -> pd.DataFrame:
-    """Flatten the unscored-but-script-described languages into a DataFrame."""
-    rows = []
-    for code, lang in data.get("languages", {}).items():
-        if (lang.get("main") or {}).get("total"):
-            continue                      # scored — belongs in the main table
-        scripts = lang.get("scripts") or []
-        if not scripts:
-            continue                      # no script information at all
-        rows.append({
-            "name":       lang.get("name") or code,
-            "glottocode": lang.get("glottocode") or code,
-            "scripts":    ", ".join(scripts),
-            "script_aux": ", ".join(lang.get("script_aux") or []),
-            "family":     lang.get("family_name") or "Unknown",
-            "reachable":  _REACH_LABEL[lang.get("script_supported")],
-        })
-    return pd.DataFrame(rows)
-
-
-def make_described_summary_html(data: dict, df: pd.DataFrame,
-                                desc: pd.DataFrame) -> str:
-    """Banner stating exactly what is and is not known about these languages."""
-    total  = len(data.get("languages", {}))
-    scored = len(df)
-    described = len(desc)
-    dark = total - scored - described
-    yes = int((desc["reachable"] == "Yes").sum()) if described else 0
-    unk = int((desc["reachable"] == "Unknown").sum()) if described else 0
-    n_scripts = desc["scripts"].str.split(", ").explode().nunique() if described else 0
-
-    def card(value, label, color="#111827"):
-        return (
-            f'<div style="flex:1;min-width:130px;background:#f9fafb;border-radius:8px;'
-            f'padding:12px 14px">'
-            f'<div style="font-size:1.5em;font-weight:700;color:{color}">{value:,}</div>'
-            f'<div style="color:#6b7280;font-size:0.8em">{label}</div></div>'
-        )
-
-    return f"""
-<div style="margin-bottom:14px">
-  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-    {card(scored, "scored (character-level)", "#1a6fb5")}
-    {card(described, "described (script only)", "#4a9bd4")}
-    {card(dark, "no information")}
-    {card(n_scripts, "distinct writing systems")}
-  </div>
-  <div style="background:#fffbeb;border-left:3px solid #f59e0b;border-radius:4px;
-              padding:10px 14px;font-size:0.88em;line-height:1.5">
-    <b>These languages have no coverage score, and none is implied here.</b>
-    CLDR provides no exemplar character set for them, so there are no characters
-    to assign to tiers. What GlotScript adds is the writing system, which supports
-    only a script-level claim: <b>{yes:,}</b> of these languages are written in a
-    script this model demonstrably represents. <b>{unk:,}</b> are marked
-    <i>Unknown</i> &mdash; no scored language uses their script, so this corpus has
-    no evidence either way. <i>Unknown</i> does not mean unsupported.
-  </div>
-</div>
-"""
-
-
-def make_described_table(desc: pd.DataFrame) -> pd.DataFrame:
-    if desc.empty:
-        return pd.DataFrame()
-    out = desc.sort_values(["reachable", "family", "name"])[
-        ["name", "scripts", "script_aux", "family", "reachable", "glottocode"]
-    ].copy()
-    out.columns = ["Language", "Script(s)", "Auxiliary Scripts", "Family",
-                   "Script Represented", "Glottocode"]
-    return out.reset_index(drop=True)
-
-
-def make_described_family_chart(desc: pd.DataFrame) -> go.Figure:
-    """Which language families the script-described set is concentrated in."""
-    if desc.empty:
-        return go.Figure()
-    top = desc["family"].value_counts().head(15).sort_values()
-    fig = go.Figure(go.Bar(
-        x=top.values, y=top.index, orientation="h",
-        marker_color="#4a9bd4",
-        hovertemplate="%{y}: %{x:,} languages<extra></extra>",
-    ))
-    fig.update_layout(
-        title="Script-described languages by family (top 15)",
-        xaxis_title="Languages", yaxis_title=None,
-        margin=dict(l=10, r=10, t=50, b=10), height=460,
-        plot_bgcolor="white",
-    )
-    fig.update_xaxes(gridcolor="#eee")
-    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -1168,8 +1125,7 @@ def render(model_name: str):
         empty_df  = pd.DataFrame()
         return ("", empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_df, empty_df,
-                "", empty_fig, empty_df,
+                empty_df, empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
     data = load_coverage(model_name)
@@ -1179,14 +1135,9 @@ def render(model_name: str):
         msg = f"<p>No CLDR language data found in coverage file for <b>{model_name}</b>.</p>"
         empty_fig = go.Figure()
         empty_df  = pd.DataFrame()
-        # Script-level description may still exist even with nothing scored.
-        desc = build_described_dataframe(data)
         return (msg, empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_df, empty_df,
-                make_described_summary_html(data, df, desc),
-                make_described_family_chart(desc),
-                make_described_table(desc),
+                empty_df, empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
     summary_html      = make_summary_html(data, df)
@@ -1201,11 +1152,7 @@ def render(model_name: str):
     fert_bar          = make_fertility_bar(df)
     incomplete_tbl    = make_incomplete_table(df)
     full_tbl          = make_full_table(df)
-
-    desc              = build_described_dataframe(data)
-    described_html    = make_described_summary_html(data, df, desc)
-    described_fam     = make_described_family_chart(desc)
-    described_tbl     = make_described_table(desc)
+    historical_tbl    = build_historical_dataframe(data)
 
     lang_choices = [
         (f"{r['name']} ({r['locale']})", r['locale'])
@@ -1226,9 +1173,7 @@ def render(model_name: str):
         fert_bar,
         incomplete_tbl,
         full_tbl,
-        described_html,
-        described_fam,
-        described_tbl,
+        historical_tbl,
         gr.update(choices=lang_choices, value=first_locale),
     )
 
@@ -1464,7 +1409,7 @@ models = list_models()
 _PREFERRED_DEFAULTS = ["gpt-4o", "gpt-4", "meta-llama/Llama-3.1-8B", "mistralai/Mistral-7B-v0.3"]
 _default_model = next((m for m in _PREFERRED_DEFAULTS if m in models), models[0] if models else None)
 
-_OUTPUTS_COUNT = 13  # must match number of return values in render()
+_OUTPUTS_COUNT = 14  # must match number of return values in render()
 
 with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
@@ -1561,21 +1506,18 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 "T0–T3 = character counts at each tier."
             )
             full_table = gr.Dataframe(interactive=False, wrap=False)
-        # ── Described-only languages ──────────────────────────────────────
-        with gr.Tab("🈳 Beyond CLDR"):
+        # -- Historical & Dead Scripts -------------------------------------
+        with gr.Tab("🏛️ Historical & Dead Scripts"):
             gr.Markdown(
-                "Languages that **cannot be scored** — CLDR provides no exemplar "
-                "characters for them, so there is nothing to assign to a coverage "
-                "tier. GlotScript supplies their writing system, which supports a "
-                "weaker claim: whether the model represents that script at all.\n\n"
-                "*Script Represented* is three-valued. **Unknown** means no scored "
-                "language uses that script, so this corpus has no evidence either "
-                "way — it does **not** mean the language is unsupported."
+                "Historical languages scored via **synthetic Unicode-block exemplars** - "
+                "dead scripts (Gothic, Cuneiform, Egyptian Hieroglyphs...) have no CLDR data, "
+                "so their character inventory is taken straight from the Unicode block.\n\n"
+                "A **byte-fallback** model scores ~20% here (every character reachable only as "
+                "raw bytes, no language signal); a model **without** byte-fallback scores 0% "
+                "(unreachable). Rows marked *no Unicode script* use a writing system Unicode does "
+                "not encode at all, so no tokenizer can ever represent them."
             )
-            described_summary = gr.HTML()
-            described_family  = gr.Plot(label="By Family")
-            described_table   = gr.Dataframe(interactive=False, wrap=False)
-
+            historical_table = gr.Dataframe(interactive=False, wrap=True)
         # ── Language Detail ───────────────────────────────────────────────
         with gr.Tab("🔍 Language Detail"):
             gr.Markdown(
@@ -1662,9 +1604,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         fert_bar_plot,
         incomplete_table,
         full_table,
-        described_summary,
-        described_family,
-        described_table,
+        historical_table,
         language_dd,
     ]
 

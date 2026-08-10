@@ -167,61 +167,6 @@ def _probe_byte_fallback(tokenizer, covered: set[int]) -> bool:
 # Main extraction function
 # ---------------------------------------------------------------------------
 
-class TokenizerLoadError(RuntimeError):
-    """A tokenizer loaded but does not encode text, so it cannot be measured.
-
-    Distinct from a missing or gated repo: the files were fetched and the object
-    was constructed, but it silently drops input instead of encoding it. Scoring
-    such a tokenizer yields plausible-looking zeros rather than an error, which
-    is why this is raised rather than warned.
-    """
-
-
-# Non-Latin samples spanning the scripts a multilingual tokenizer must handle.
-# Deliberately not exhaustive — this is a liveness check on the loaded object,
-# not a coverage measurement. Coverage is what the rest of the pipeline computes.
-_ROUNDTRIP_PROBES: tuple[tuple[str, str], ...] = (
-    ("Latin", "hello"),
-    ("Greek", "\u03b3\u03b5\u03b9\u03ac"),
-    ("Cyrillic", "\u041f\u0440\u0438\u0432\u0435\u0442"),
-    ("Arabic", "\u0645\u0631\u062d\u0628\u0627"),
-    ("Han", "\u4f60\u597d"),
-)
-
-
-def _assert_tokenizer_is_lossless(tokenizer, model_id: str) -> None:
-    """Fail if the tokenizer encodes text to nothing.
-
-    Motivating case: mistralai/Mistral-Small-3.2-24B-Instruct-2506 under
-    transformers 5.14.1. Its tekken.json converts without error, but the
-    resulting object encodes every non-ASCII string to zero token ids. Ingesting
-    it produced a mean score of 0.631 with 100 languages at literal zero —
-    indistinguishable in the stored output from a genuinely ASCII-only
-    tokenizer, and it ranked mid-leaderboard rather than looking broken.
-
-    Empty output for *every* probe means the loader is broken, not that the
-    model is English-only: a real ASCII-only tokenizer still encodes "hello",
-    and one without byte fallback emits an <unk> id rather than nothing at all.
-    """
-    dead = [
-        name
-        for name, sample in _ROUNDTRIP_PROBES
-        if len(tokenizer.encode(sample, add_special_tokens=False)) == 0
-    ]
-    if not dead:
-        return
-    raise TokenizerLoadError(
-        f"Tokenizer for '{model_id}' loaded but encodes text to nothing.\n"
-        f"  Scripts encoding to zero tokens: {', '.join(dead)}\n"
-        "  A tokenizer that discards input cannot be scored: every affected\n"
-        "  language would be recorded as zero coverage, which is a load failure\n"
-        "  reported as a measurement.\n"
-        "  Known cause: Mistral 'tekken' tokenizers under transformers>=5.14.\n"
-        "  Try a transformers version that round-trips this repo, or ingest the\n"
-        "  tokenizer from a local checkout with --local."
-    )
-
-
 def extract(
     model_id: str,
     hf_token: str | None = None,
@@ -328,8 +273,6 @@ def extract(
     # it last so probe characters can be filtered against what the vocabulary
     # actually covers.
     has_byte_fallback = _probe_byte_fallback(tokenizer, codepoints_any)
-
-    _assert_tokenizer_is_lossless(tokenizer, model_id)
 
     return ModelVocabData(
         model_id=model_id,

@@ -113,6 +113,14 @@ _LOCALE_TO_UDHR: dict[str, str] = {
 # Expected script keywords per locale (for Test 2)
 # ---------------------------------------------------------------------------
 _LOCALE_SCRIPT: dict[str, str] = {
+    # Latin-script languages (needed so control locales get a script verdict)
+    "en":  "latin",      "es":  "latin",      "fr":  "latin",
+    "de":  "latin",      "pt":  "latin",      "it":  "latin",
+    "nl":  "latin",      "pl":  "latin",      "ro":  "latin",
+    "sv":  "latin",      "da":  "latin",      "fi":  "latin",
+    "no":  "latin",      "cs":  "latin",      "sk":  "latin",
+    "tr":  "latin",      "id":  "latin",      "vi":  "latin",
+    # Non-Latin scripts
     "am":  "ethiopic",   "ti":  "ethiopic",
     "ar":  "arabic",     "fa":  "arabic",     "ur":  "arabic",
     "ug":  "arabic",     "ps":  "arabic",
@@ -144,6 +152,9 @@ _LOCALE_SCRIPT: dict[str, str] = {
     "zgh": "tifinagh",
     "vai": "vai",
 }
+
+# Alternative keywords Claude uses to identify the Latin/Roman alphabet
+_LATIN_SCRIPT_KEYWORDS = frozenset({"latin", "roman", "alphabet", "latin alphabet", "latin script"})
 
 # ---------------------------------------------------------------------------
 # Fallback sentences (used when no UDHR file exists)
@@ -240,14 +251,18 @@ def _probe_sentence(locale: str) -> str:
 
 
 def _char_fidelity(original: str, response: str) -> float:
-    """Ratio of original non-whitespace characters reproduced in response."""
+    """Proportion of original non-whitespace characters reproduced in response.
+
+    Uses matched_chars / len(original) rather than SequenceMatcher.ratio()
+    so that model preamble/postamble does not penalise the score.
+    """
     orig_clean = "".join(c for c in original if not c.isspace())
     if not orig_clean:
         return 1.0
     resp_clean = "".join(c for c in response if not c.isspace())
-    return difflib.SequenceMatcher(
-        None, orig_clean, resp_clean, autojunk=False
-    ).ratio()
+    matcher = difflib.SequenceMatcher(None, orig_clean, resp_clean, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(orig_clean)
 
 
 def _has_byte_artifacts(text: str) -> bool:
@@ -334,6 +349,7 @@ def _call_openai(
     model: str,
     messages: list[dict],
     timeout: int = 60,
+    extra_headers: dict[str, str] | None = None,
 ) -> str:
     """Call an OpenAI-compatible chat completion endpoint."""
     import urllib.request
@@ -344,18 +360,46 @@ def _call_openai(
         "max_tokens": 400,
         "temperature": 0,
     }).encode()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = json.loads(resp.read().decode())
     return body["choices"][0]["message"]["content"].strip()
+
+
+def _call_portkey(
+    api_key: str,
+    virtual_key: str,
+    model: str,
+    messages: list[dict],
+) -> str:
+    """Call any provider via the Portkey AI gateway SDK.
+
+    Portkey uses x-portkey-api-key / x-portkey-virtual-key headers, NOT
+    Authorization: Bearer, which is why the plain openai api-type returns 403.
+    """
+    from portkey_ai import Portkey
+    kwargs: dict = {"api_key": api_key}
+    if virtual_key:
+        kwargs["virtual_key"] = virtual_key
+    client = Portkey(**kwargs)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=400,
+        temperature=0,
+    )
+    return resp.choices[0].message.content.strip()
 
 
 def _call_gemini(
@@ -388,6 +432,39 @@ def _call_gemini(
 # Single-locale probe
 # ---------------------------------------------------------------------------
 
+def grade_verdict(
+    fidelity: float | None,
+    script_recognized: bool | None,
+    translation_refused: bool | None,
+    echo_failed: bool,
+) -> str:
+    """
+    Grade one locale from the three test outcomes.
+
+    Returns "Strong", "Partial", "Poor", or "Error".
+
+    "Error" means the evidence never arrived, which is categorically different
+    from "Poor". Earlier versions set ``fidelity = 0.0`` and
+    ``translation_refused = True`` on any exception and then graded the row
+    normally, so a timeout or an expired key produced "Poor" — indistinguishable
+    from a model that mangled the script. Every row in ``data/probes/`` was
+    written that way: all 108 failed with HTTP 403 and were stored as "Poor",
+    which the dashboard displayed as 36 failing languages per frontier model.
+
+    The echo test is load-bearing: without a round-trip there is no fidelity
+    measurement to grade, so its failure is inconclusive. Failures in the script
+    or translation tests only remove one signal, and are handled by the
+    ``None``-tolerant comparisons below.
+    """
+    if echo_failed or fidelity is None:
+        return "Error"
+    if fidelity >= 0.95 and script_recognized and translation_refused is False:
+        return "Strong"
+    if fidelity >= 0.75 or script_recognized:
+        return "Partial"
+    return "Poor"
+
+
 def probe_locale(
     locale: str,
     lang_name: str,
@@ -397,6 +474,8 @@ def probe_locale(
     model: str,
     timeout: int,
     pause: float,
+    extra_headers: dict[str, str] | None = None,
+    virtual_key: str = "",
 ) -> dict:
     """Run the 3-test battery for one locale. Returns a result dict."""
 
@@ -408,9 +487,14 @@ def probe_locale(
         try:
             if api_type == "gemini":
                 return _call_gemini(api_key, model, prompt, timeout), None
+            elif api_type == "portkey":
+                msgs = [{"role": "user", "content": prompt}]
+                return _call_portkey(api_key, virtual_key, model, msgs), None
             else:
                 msgs = [{"role": "user", "content": prompt}]
-                return _call_openai(api_key, base_url, model, msgs, timeout), None
+                return _call_openai(
+                    api_key, base_url, model, msgs, timeout, extra_headers
+                ), None
         except Exception as exc:
             return "", str(exc)
 
@@ -420,9 +504,13 @@ def probe_locale(
         f"preserving every character without translation or modification:"
         f"\n\n{probe_text}"
     )
+    # A transport failure is not evidence about the model.  Leaving fidelity at
+    # 0.0 on a timeout or rate-limit would score an unreachable API exactly like
+    # a model that mangled the script, so failed calls yield None and the
+    # verdict below reports "Error" rather than "Poor".
     if echo_err:
-        fidelity = 0.0
-        byte_artifacts = False
+        fidelity = None
+        byte_artifacts = None
     else:
         fidelity = _char_fidelity(probe_text, echo_resp)
         byte_artifacts = _has_byte_artifacts(echo_resp)
@@ -434,26 +522,41 @@ def probe_locale(
     )
     if script_err or not expected_script:
         script_recognized = None  # unknown
+    elif expected_script == "latin":
+        # Models may say "Latin", "Roman", "Latin alphabet", etc.
+        script_recognized = any(
+            kw in script_resp.lower() for kw in _LATIN_SCRIPT_KEYWORDS
+        )
     else:
         script_recognized = expected_script.lower() in script_resp.lower()
 
     # ── Test 3: Translation ───────────────────────────────────────────
-    trans_resp, trans_err = call(
-        f"Translate the following {lang_name} text into English. "
-        f"If you cannot understand the text, say so explicitly:\n\n{probe_text}"
-    )
-    if trans_err:
-        translation_refused = True
+    # Skip translation for English — translating English→English is nonsensical
+    # and causes models to refuse ("cannot translate, already in English"),
+    # producing a false failure on the refusal regex.
+    if locale == "en":
+        trans_resp = "[skipped — source language is English]"
+        trans_err = None
+        translation_refused = False
     else:
-        translation_refused = bool(_REFUSAL_RE.search(trans_resp))
+        trans_resp, trans_err = call(
+            f"Translate the following {lang_name} text into English. "
+            f"If you cannot understand the text, say so explicitly:\n\n{probe_text}"
+        )
+        if trans_err:
+            # Unknown, not refused: we never heard back from the model.
+            translation_refused = None
+        else:
+            translation_refused = bool(_REFUSAL_RE.search(trans_resp))
 
     # ── Verdict ───────────────────────────────────────────────────────
-    if fidelity >= 0.95 and script_recognized and not translation_refused:
-        verdict = "Strong"
-    elif fidelity >= 0.75 or script_recognized:
-        verdict = "Partial"
-    else:
-        verdict = "Poor"
+    errors = [e for e in (echo_err, script_err, trans_err) if e]
+    verdict = grade_verdict(
+        fidelity=fidelity,
+        script_recognized=script_recognized,
+        translation_refused=translation_refused,
+        echo_failed=bool(echo_err),
+    )
 
     return {
         "locale":              locale,
@@ -461,7 +564,7 @@ def probe_locale(
         "probe_text":          probe_text,
         "echo_response":       echo_resp,
         "echo_error":          echo_err,
-        "echo_fidelity":       round(fidelity, 4),
+        "echo_fidelity":       round(fidelity, 4) if fidelity is not None else None,
         "byte_artifacts":      byte_artifacts,
         "expected_script":     expected_script,
         "script_response":     script_resp,
@@ -471,6 +574,10 @@ def probe_locale(
         "translation_error":   trans_err,
         "translation_refused": translation_refused,
         "verdict":             verdict,
+        # True when at least one of the three calls never completed, so a
+        # consumer can exclude these rows instead of reading them as findings.
+        "transport_failed":    bool(errors),
+        "n_transport_errors":  len(errors),
     }
 
 
@@ -514,13 +621,19 @@ def main() -> None:
         help="Name of the model to probe (e.g. gemini-2.0-flash, gpt-4o).",
     )
     parser.add_argument(
-        "--api-type", required=True, choices=["openai", "gemini"],
+        "--api-type", required=True, choices=["openai", "gemini", "portkey"],
         help="API backend: 'openai' for OpenAI-compatible endpoints, "
-             "'gemini' for Google Gemini.",
+             "'gemini' for Google Gemini, 'portkey' for the Portkey AI gateway.",
     )
     parser.add_argument(
         "--api-key", default=None,
-        help="API key. Defaults to OPENAI_API_KEY or GEMINI_API_KEY env var.",
+        help="API key. For portkey: your Portkey API key. "
+             "Defaults to PORTKEY_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY env var.",
+    )
+    parser.add_argument(
+        "--virtual-key", default=None,
+        help="Portkey virtual key that encodes the upstream provider + credentials. "
+             "Defaults to PORTKEY_VIRTUAL_KEY env var. Required for --api-type portkey.",
     )
     parser.add_argument(
         "--base-url", default="https://api.openai.com/v1",
@@ -562,21 +675,49 @@ def main() -> None:
              "list as a sanity check. Pass --controls with no arguments to "
              "disable. Default: en es fr de zh ja ar ru hi ko",
     )
+    parser.add_argument(
+        "--extra-headers", default=None, metavar="JSON",
+        help='Extra HTTP headers as a JSON object, e.g. '
+             '\'{"x-portkey-api-key": "pk-...", "x-portkey-provider": "anthropic"}\'. '
+             'Useful for gateway proxies like Portkey that require custom headers.',
+    )
     args = parser.parse_args()
 
     # ── API key resolution ─────────────────────────────────────────────
     api_key = args.api_key
     if not api_key:
-        env_var = "GEMINI_API_KEY" if args.api_type == "gemini" else "OPENAI_API_KEY"
+        if args.api_type == "gemini":
+            env_var = "GEMINI_API_KEY"
+        elif args.api_type == "portkey":
+            env_var = "PORTKEY_API_KEY"
+        else:
+            env_var = "OPENAI_API_KEY"
         api_key = os.environ.get(env_var, "")
     if not api_key:
         print(
-            f"[!] No API key provided. Set --api-key or the "
-            f"{'GEMINI_API_KEY' if args.api_type == 'gemini' else 'OPENAI_API_KEY'} "
-            f"environment variable.",
+            f"[!] No API key provided. Set --api-key or the {env_var} environment variable.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # ── Virtual key (Portkey only) ─────────────────────────────────────
+    virtual_key = args.virtual_key or os.environ.get("PORTKEY_VIRTUAL_KEY", "")
+    if args.api_type == "portkey" and not virtual_key:
+        print(
+            "[*] No --virtual-key provided; using Portkey api_key only "
+            "(requires a default Config set in the Portkey dashboard)."
+        )
+
+    # ── Extra headers ──────────────────────────────────────────────────
+    extra_headers: dict[str, str] | None = None
+    if args.extra_headers:
+        try:
+            extra_headers = json.loads(args.extra_headers)
+            if not isinstance(extra_headers, dict):
+                raise ValueError("must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"[!] --extra-headers is not valid JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # ── Locale selection ───────────────────────────────────────────────
     name_map = _build_name_map()
@@ -643,15 +784,19 @@ def main() -> None:
                 model=args.model,
                 timeout=args.timeout,
                 pause=args.pause,
+                extra_headers=extra_headers,
+                virtual_key=virtual_key,
             )
             result["median_known_score"] = round(med_score, 4)
             result["is_control"] = locale in control_locales_set
             results[locale] = result
 
-            fid = f"{result['echo_fidelity']:.0%}"
+            fid = ("n/a" if result["echo_fidelity"] is None
+                   else f"{result['echo_fidelity']:.0%}")
             scr = ("yes" if result["script_recognized"] else
                    "no" if result["script_recognized"] is False else "?")
-            tr  = "no" if result["translation_refused"] else "yes"
+            tr  = ("?" if result["translation_refused"] is None
+                   else "no" if result["translation_refused"] else "yes")
             v   = result["verdict"]
             art = " [byte-leak]" if result["byte_artifacts"] else ""
             ctrl = " [control]" if result["is_control"] else ""
@@ -692,11 +837,28 @@ def main() -> None:
     strong  = verdicts.count("Strong")
     partial = verdicts.count("Partial")
     poor    = verdicts.count("Poor")
-    errors  = sum(1 for r in results.values() if "error" in r)
+    # Locales where a call never completed. These are inconclusive, not
+    # negative results — reporting them as "Poor" would attribute an API
+    # outage to the model's handling of the language.
+    inconclusive = verdicts.count("Error") + sum(1 for r in results.values() if "error" in r)
+    degraded = sum(
+        1 for r in results.values()
+        if r.get("transport_failed") and r.get("verdict") != "Error"
+    )
     print(
         f"\n  Summary: {strong} Strong / {partial} Partial / {poor} Poor"
-        + (f" / {errors} Errors" if errors else "")
+        + (f" / {inconclusive} inconclusive (call failed)" if inconclusive else "")
     )
+    if degraded:
+        print(
+            f"  Note: {degraded} graded locale(s) had a partial transport failure; "
+            "their verdict rests on fewer than three tests."
+        )
+    if inconclusive:
+        print(
+            "  Inconclusive locales carry no evidence about language support — "
+            "exclude them from scoring rather than counting them as failures."
+        )
 
 
 if __name__ == "__main__":
