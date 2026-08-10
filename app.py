@@ -115,6 +115,72 @@ def build_dataframe(data: dict) -> pd.DataFrame:
     return df.sort_values("score").reset_index(drop=True)
 
 
+_HISTORICAL_COLUMNS = [
+    "Language", "Script", "ISO", "Family", "Source", "Coverage", "Status", "T2", "T3",
+]
+
+
+def build_historical_dataframe(data: dict) -> pd.DataFrame:
+    """Table of historical languages this pipeline scores or flags as unreachable.
+
+    Covers dead-script languages given synthetic Unicode-block exemplars plus the
+    handful of CLDR classical languages, and languages whose script Unicode does
+    not encode at all. Living-script historical languages are excluded - they are
+    already reachable and appear in the ordinary CLDR views.
+    """
+    rows = []
+    for locale, lang in data["languages"].items():
+        if not lang.get("is_historical"):
+            continue
+        main = lang.get("main") or {}
+        scored = bool(main)
+        unencoded = lang.get("script_encoded") is False
+        if not scored and not unencoded:
+            continue  # living-script / script-unknown historical: not this view
+
+        if lang.get("exemplar_source") == "unicode_block":
+            source = "Unicode block"
+        elif lang.get("has_cldr"):
+            source = "CLDR"
+        else:
+            source = "\u2014"
+
+        if scored:
+            score = main.get("weighted_score", 0.0)
+            t2, t3 = main.get("tier2_count", 0), main.get("tier3_count", 0)
+            coverage = f"{score:.0%}"
+            if t3 and not t2:
+                status = "unreachable (no byte-fallback)"
+            elif t2:
+                status = "byte-fallback only"
+            else:
+                status = "native tokens"
+            sort_key = score
+        else:
+            t2 = t3 = 0
+            coverage = "\u2014"
+            status = "no Unicode script"
+            sort_key = -1.0
+
+        rows.append({
+            "Language": lang.get("name", locale),
+            "Script":   lang.get("script") or ", ".join(lang.get("scripts") or []) or "\u2014",
+            "ISO":      lang.get("iso639_3") or "",
+            "Family":   lang.get("family_name") or "\u2014",
+            "Source":   source,
+            "Coverage": coverage,
+            "Status":   status,
+            "T2":       t2,
+            "T3":       t3,
+            "_sort":    sort_key,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=_HISTORICAL_COLUMNS)
+    df = pd.DataFrame(rows)
+    return df.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Summary panel
 # ---------------------------------------------------------------------------
@@ -1059,7 +1125,7 @@ def render(model_name: str):
         empty_df  = pd.DataFrame()
         return ("", empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_df, empty_df,
+                empty_df, empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
     data = load_coverage(model_name)
@@ -1071,7 +1137,7 @@ def render(model_name: str):
         empty_df  = pd.DataFrame()
         return (msg, empty_fig, empty_fig, empty_fig, empty_df,
                 empty_fig, empty_fig, empty_fig, empty_fig, empty_fig,
-                empty_df, empty_df,
+                empty_df, empty_df, empty_df,
                 gr.update(choices=[], value=None))
 
     summary_html      = make_summary_html(data, df)
@@ -1086,6 +1152,7 @@ def render(model_name: str):
     fert_bar          = make_fertility_bar(df)
     incomplete_tbl    = make_incomplete_table(df)
     full_tbl          = make_full_table(df)
+    historical_tbl    = build_historical_dataframe(data)
 
     lang_choices = [
         (f"{r['name']} ({r['locale']})", r['locale'])
@@ -1106,6 +1173,7 @@ def render(model_name: str):
         fert_bar,
         incomplete_tbl,
         full_tbl,
+        historical_tbl,
         gr.update(choices=lang_choices, value=first_locale),
     )
 
@@ -1341,7 +1409,7 @@ models = list_models()
 _PREFERRED_DEFAULTS = ["gpt-4o", "gpt-4", "meta-llama/Llama-3.1-8B", "mistralai/Mistral-7B-v0.3"]
 _default_model = next((m for m in _PREFERRED_DEFAULTS if m in models), models[0] if models else None)
 
-_OUTPUTS_COUNT = 13  # must match number of return values in render()
+_OUTPUTS_COUNT = 14  # must match number of return values in render()
 
 with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
 
@@ -1438,6 +1506,18 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
                 "T0–T3 = character counts at each tier."
             )
             full_table = gr.Dataframe(interactive=False, wrap=False)
+        # -- Historical & Dead Scripts -------------------------------------
+        with gr.Tab("🏛️ Historical & Dead Scripts"):
+            gr.Markdown(
+                "Historical languages scored via **synthetic Unicode-block exemplars** - "
+                "dead scripts (Gothic, Cuneiform, Egyptian Hieroglyphs...) have no CLDR data, "
+                "so their character inventory is taken straight from the Unicode block.\n\n"
+                "A **byte-fallback** model scores ~20% here (every character reachable only as "
+                "raw bytes, no language signal); a model **without** byte-fallback scores 0% "
+                "(unreachable). Rows marked *no Unicode script* use a writing system Unicode does "
+                "not encode at all, so no tokenizer can ever represent them."
+            )
+            historical_table = gr.Dataframe(interactive=False, wrap=True)
         # ── Language Detail ───────────────────────────────────────────────
         with gr.Tab("🔍 Language Detail"):
             gr.Markdown(
@@ -1524,6 +1604,7 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         fert_bar_plot,
         incomplete_table,
         full_table,
+        historical_table,
         language_dd,
     ]
 
