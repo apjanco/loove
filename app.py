@@ -25,6 +25,7 @@ import plotly.graph_objects as go
 
 ROOT = Path(__file__).parent
 COVERAGE_DIR = ROOT / "data" / "coverage"
+MODELS_DIR = ROOT / "data" / "models"
 
 GRADE_COLORS = {
     "Excellent": "#22c55e",
@@ -887,6 +888,159 @@ def make_model_comparison_chart(locale: str, lang_name: str) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
+# Cross-model character/text lookup — "is my language even in vocabulary?"
+#
+# Uses data/models/*.json (raw per-model codepoint sets), not the CLDR-scoped
+# tier lists in data/coverage/*.json. This is what makes it possible to check
+# an arbitrary pasted character against every model at once, instead of only
+# whole-language aggregates.
+# ---------------------------------------------------------------------------
+
+_MODEL_VOCAB: dict = {}
+_vocab_loaded = False
+
+
+def _ensure_vocab_loaded() -> None:
+    global _vocab_loaded
+    if _vocab_loaded:
+        return
+    for path in sorted(MODELS_DIR.glob("*.json")):
+        model_display = path.stem.replace("__", "/")
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        _MODEL_VOCAB[model_display] = {
+            "single": set(d.get("codepoints_single", [])),
+            "any": set(d.get("codepoints_any", [])),
+            "byte_fallback": bool(d.get("has_byte_fallback", False)),
+            "source": d.get("source", ""),
+        }
+    _vocab_loaded = True
+
+
+def _tier_for_codepoint(cp: int, entry: dict) -> int:
+    if cp in entry["single"]:
+        return 0
+    if cp in entry["any"]:
+        return 1
+    if entry["byte_fallback"]:
+        return 2
+    return 3
+
+
+_LOOKUP_TIER_LABEL = {
+    0: "🟢 Native token",
+    1: "🟡 Embedded only",
+    2: "🟠 Byte-fallback only",
+    3: "🔴 Unreachable",
+}
+
+_LOOKUP_COLUMNS = ["Model", "Source", "Result", "Byte-Fallback?", "Problem Characters"]
+
+
+def lookup_across_models(text: str):
+    """Classify every character in `text` against every model with raw vocab data.
+
+    Returns (summary_html, dataframe) — the direct answer to "is my language
+    even in vocabulary?", for whatever the user actually pastes, across every
+    model at once, instead of only a whole-CLDR-language aggregate.
+    """
+    _ensure_vocab_loaded()
+    text = (text or "").strip()
+    if not text:
+        return "", pd.DataFrame(columns=_LOOKUP_COLUMNS)
+
+    chars = [c for c in dict.fromkeys(text) if not c.isspace()]
+    if not chars:
+        return (
+            "<p style='color:#6b7280'>Enter at least one non-whitespace character.</p>",
+            pd.DataFrame(columns=_LOOKUP_COLUMNS),
+        )
+
+    rows = []
+    tier_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    unreachable_models = []
+
+    for model_display, entry in _MODEL_VOCAB.items():
+        worst = 0
+        problems = []
+        for c in chars:
+            tier = _tier_for_codepoint(ord(c), entry)
+            worst = max(worst, tier)
+            if tier >= 2:
+                problems.append(f"{c} (U+{ord(c):04X})")
+
+        tier_counts[worst] += 1
+        if worst == 3:
+            unreachable_models.append(model_display)
+
+        rows.append({
+            "Model": model_display,
+            "Source": entry["source"],
+            "Result": _LOOKUP_TIER_LABEL[worst],
+            "Byte-Fallback?": "Yes" if entry["byte_fallback"] else "No",
+            "Problem Characters": ", ".join(problems) if problems else "—",
+            "_tier": worst,
+        })
+
+    df = (
+        pd.DataFrame(rows)
+        .sort_values(["_tier", "Model"])
+        .drop(columns="_tier")
+        .reset_index(drop=True)
+    )
+    total = len(df)
+
+    def badge(label, count, color):
+        return (
+            f'<span style="background:{color};color:white;padding:3px 12px;'
+            f'border-radius:999px;font-weight:600;font-size:0.9em">{label} {count}</span>'
+        )
+
+    summary_bits = (
+        badge("\U0001F7E2 native", tier_counts[0], "#22c55e")
+        + badge("\U0001F7E1 embedded", tier_counts[1], "#84cc16")
+        + badge("\U0001F7E0 byte-fallback", tier_counts[2], "#f97316")
+        + badge("\U0001F534 unreachable", tier_counts[3], "#ef4444")
+    )
+
+    warn = ""
+    if unreachable_models:
+        shown = ", ".join(f"<code>{m}</code>" for m in unreachable_models[:6])
+        more = f" +{len(unreachable_models) - 6} more" if len(unreachable_models) > 6 else ""
+        warn = (
+            '<div style="background:#fef2f2;border-left:4px solid #ef4444;padding:10px 14px;'
+            'border-radius:0 8px 8px 0;margin-top:10px;color:#7f1d1d;font-size:0.92em">'
+            f'<strong>Cannot represent this text at all:</strong> {shown}{more}. '
+            'These tokenizers have no byte-fallback path — the text collapses to a single '
+            '<code>&lt;unk&gt;</code> token, indistinguishable from any other unsupported input.'
+            '</div>'
+        )
+
+    skipped = len(list_models()) - total
+    skip_note = ""
+    if skipped > 0:
+        skip_note = (
+            f'<div style="color:#94a3b8;font-size:0.82em;margin-top:8px">'
+            f'{skipped} additional model(s) in the leaderboard don’t have raw vocabulary data '
+            f'ingested yet and aren’t shown here.</div>'
+        )
+
+    summary_html = f"""
+<div style="font-family:sans-serif">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    {summary_bits}
+    <span style="color:#6b7280;margin-left:auto">{total} models checked</span>
+  </div>
+  {warn}
+  {skip_note}
+</div>
+"""
+    return summary_html, df
+
+
+# ---------------------------------------------------------------------------
 # Interactive tokenization demo
 # ---------------------------------------------------------------------------
 
@@ -1420,6 +1574,29 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
         "and per-language breakdown across ~1 000 CLDR locales."
     )
 
+    with gr.Group():
+        gr.Markdown(
+            "### 🔎 Is your language even in vocabulary?\n"
+            "Paste a character, word, or short phrase and check it against **every model at "
+            "once** — before you pick a model, not after."
+        )
+        with gr.Row():
+            lookup_input = gr.Textbox(
+                label="Text to check",
+                placeholder="e.g. ѣ — Cyrillic yat — or paste any word or short phrase",
+                scale=4,
+            )
+            lookup_btn = gr.Button("Check across all models", variant="primary", scale=1)
+        with gr.Row():
+            ex_yat  = gr.Button("ѣ — pre-reform Cyrillic yat", size="sm")
+            ex_cher = gr.Button("Ꭰ — Cherokee syllabary", size="sm")
+            ex_cun  = gr.Button("𒀀 — Akkadian cuneiform", size="sm")
+            ex_copt = gr.Button("ⲁ — Coptic", size="sm")
+        lookup_summary_html = gr.HTML()
+        lookup_table = gr.Dataframe(interactive=False, wrap=True)
+
+    gr.Markdown("---")
+
     with gr.Row():
         model_dd = gr.Dropdown(
             choices=models,
@@ -1590,6 +1767,15 @@ with gr.Blocks(title="LLM Vocabulary Coverage Dashboard") as demo:
             )
 
     # ── Wire events ───────────────────────────────────────────────────────
+
+    lookup_outputs = [lookup_summary_html, lookup_table]
+    lookup_btn.click(fn=lookup_across_models, inputs=[lookup_input], outputs=lookup_outputs)
+    for ex_btn, ex_text in [
+        (ex_yat, "ѣ"), (ex_cher, "Ꭰ"), (ex_cun, "𒀀"), (ex_copt, "ⲁ"),
+    ]:
+        ex_btn.click(fn=lambda t=ex_text: t, outputs=[lookup_input]).then(
+            fn=lookup_across_models, inputs=[lookup_input], outputs=lookup_outputs
+        )
 
     outputs = [
         summary_html,
